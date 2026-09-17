@@ -118,6 +118,31 @@ the value pathway learning gist transport before query sharpening.)
 - Step-0 sanity test: with reads zeroed and LoRA at init, student logits must
   equal base-model logits exactly.
 
+## v2 roadmap (drafted 2026-09-17, L2 at step ~7200, recall 86%)
+
+L1/L0 arms deprioritized (single-vector hypothesis untenable given ordered-
+digit recall). Priorities:
+
+1. **Writer-gradient ladder** (gates everything): (i) end-to-end [current] /
+   (ii) detached [writes drift via shared LoRA, no memory signal] /
+   (iii) frozen writer [pass 1 = pure base weights]. If (iii ≈ i): memories
+   are precomputable per corpus → offline indexing + reader-only training.
+2. **Cheap post-hoc suite on existing checkpoints** (second machine ok):
+   top-K sweep (predict K=8 lossless at entropy 1.6); site/head pruning map
+   (predict sub-write-layer sites 3-15 matter least); read-rank SVD knee;
+   readmaps; length generalization (600-1300 tok questions); contradiction
+   + two-binding interference probes; empty-bank regression vs base.
+3. **Chat REPL**: exposes untrained assistant self-writes; qualitative.
+4. **Multi-turn training** on ultrachat conversations (chunk=turn, bank
+   accumulates): introduces self-writes + update-semantics pressure.
+5. **Passage-bank training** (the scaling play): teacher answers with the
+   relevant SHORT passage in context; student retrieves from a bank of N
+   precomputed passages (needs frozen writer). Distractor count = curriculum
+   knob; teacher writes the questions; hard negatives force discriminative
+   retrieval. Core principle: the teacher never needs long context, only the
+   right short context. Alt objective: sliding-window LM distillation
+   (teacher sees recent W tokens, student sees memory only).
+
 ## Deferred until the smoke test shows promise
 
 - ANN / metric-tree top-K search (Jeremy has existing O(log N) infrastructure);
