@@ -168,12 +168,19 @@ def training_step(model, tok, ctx, args, questions, want_stats=False, fixed_gen=
     del t_out
     torch.cuda.empty_cache()
 
-    # 2. Student pass 1: write memory (skipped for L0).
+    # 2. Student pass 1: write memory (skipped for L0). With --detach-writes,
+    # pass 1 runs gradient-free: LoRA still shapes the writes (shared weights
+    # drift) but no memory-use gradient optimizes them — and pass 1 costs no
+    # activation memory or backward time.
     ctx.clear()
     if args.arm != "L0":
         uids, umask = pad_batch(user_ids, pad_id, "right", device)
         ctx.collect_writes, ctx.reads_enabled = True, False
-        model(input_ids=uids, attention_mask=umask, use_cache=False)
+        if getattr(args, "detach_writes", False):
+            with torch.no_grad():
+                model(input_ids=uids, attention_mask=umask, use_cache=False)
+        else:
+            model(input_ids=uids, attention_mask=umask, use_cache=False)
         ctx.collect_writes = False
         mem, mem_mask = ctx.written, umask
         if args.arm == "L1":  # last real token only
@@ -260,6 +267,8 @@ def main():
     ap.add_argument("--eval-interval", type=int, default=250)
     ap.add_argument("--save-interval", type=int, default=1000)
     ap.add_argument("--max-steps", type=int, default=0, help="0 = one full epoch")
+    ap.add_argument("--detach-writes", action="store_true",
+                    help="no gradient through the memory into pass 1")
     ap.add_argument("--run-name", default=None)
     args = ap.parse_args()
 
@@ -267,6 +276,7 @@ def main():
     outdir = os.path.join("runs", run)
     os.makedirs(outdir, exist_ok=True)
     logf = open(os.path.join(outdir, "log.jsonl"), "a")
+    logf.write(json.dumps({"config": vars(args)}) + "\n"); logf.flush()
 
     tok, model, ctx = build_model(args)
     trainable = [p for p in model.parameters() if p.requires_grad]

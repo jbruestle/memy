@@ -241,6 +241,13 @@ digit recall). Priorities:
   ~1.6 nats, sharper than ~90% of base-model attention rows at similar
   context length (measured: attn mean 2.90/median 3.02 nats) — sharpness
   emerging WITHOUT sparsity regularization, de-risking top-K scaling.
+- **2026-09-17 (REPL, ckpt ~7k)** — single-turn: REASONING OVER RETRIEVED
+  BINDINGS works: 4 name-age pairs retrieved with zero cross-binding
+  confusion, then compared correctly (youngest). Normalized read entropy
+  0.46 over a 43-memory bank (~5-6 effective memories/read). Multi-turn:
+  incoherent, as expected — fully OOD (bank never held >1 chunk nor
+  self-writes in training). Conclusion: the gap is distributional, not
+  architectural → multi-turn training rises in v2 priority.
 - **2026-09-17 (step 4500, L2)** — eval_kl 0.137, recall 0.875 (name 0.875,
   relname 0.75, AMOUNT 0.75, year 1.0, item 1.0). Ordered-digit recall
   through the bottleneck confirmed — the v1 core question is answered
