@@ -17,7 +17,7 @@ import argparse
 import json
 import os
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import torch
 import torch.nn.functional as F
@@ -41,14 +41,23 @@ def build_model(args):
     model.config.use_cache = False
     ctx, _readers = install_memory(model, write_layer=args.write_layer,
                                    n_heads=args.read_heads, rank=args.read_rank)
-    lora = LoraConfig(r=args.lora_r, lora_alpha=2 * args.lora_r, lora_dropout=0.0,
-                      target_modules=LORA_TARGETS, bias="none")
-    model = get_peft_model(model, lora)
-    for p in reader_parameters(model):
-        p.requires_grad_(True)
+    if getattr(args, "no_lora", False):
+        # Readers-only training: base model entirely frozen, writes are pure
+        # base states (and carry no trainable params, so pass 1 is detached).
+        for p in model.parameters():
+            p.requires_grad_(False)
+        for p in reader_parameters(model):
+            p.requires_grad_(True)
+    else:
+        lora = LoraConfig(r=args.lora_r, lora_alpha=2 * args.lora_r, lora_dropout=0.0,
+                          target_modules=LORA_TARGETS, bias="none")
+        model = get_peft_model(model, lora)
+        for p in reader_parameters(model):
+            p.requires_grad_(True)
     if args.grad_ckpt:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        model.enable_input_require_grads()
+        if not getattr(args, "no_lora", False):
+            model.enable_input_require_grads()
     model.train()  # required: HF only checkpoints in train mode (all dropouts are 0)
     return tok, model, ctx
 
@@ -59,8 +68,11 @@ def teacher_mode(model, ctx):
     was_training = model.training
     ctx.reads_enabled = False
     model.eval()  # train mode + grad ckpt forces use_cache=False, breaking generate
+    # Without PEFT (--no-lora) the frozen base with reads off IS the teacher.
+    adapter_off = model.disable_adapter() if hasattr(model, "disable_adapter") \
+        else nullcontext()
     try:
-        with model.disable_adapter(), torch.no_grad():
+        with adapter_off, torch.no_grad():
             yield
     finally:
         if was_training:
@@ -269,8 +281,12 @@ def main():
     ap.add_argument("--max-steps", type=int, default=0, help="0 = one full epoch")
     ap.add_argument("--detach-writes", action="store_true",
                     help="no gradient through the memory into pass 1")
+    ap.add_argument("--no-lora", action="store_true",
+                    help="train ONLY the read heads; base model fully frozen")
     ap.add_argument("--run-name", default=None)
     args = ap.parse_args()
+    if args.no_lora:
+        args.detach_writes = True  # pass 1 has no trainable params anyway
 
     run = args.run_name or f"{args.arm}-{time.strftime('%m%d-%H%M')}"
     outdir = os.path.join("runs", run)
@@ -339,9 +355,13 @@ def main():
             logf.flush()
 
         if step > 0 and step % args.save_interval == 0:
-            model.save_pretrained(os.path.join(outdir, f"ckpt-{step}"))
+            ckdir = os.path.join(outdir, f"ckpt-{step}")
+            if args.no_lora:
+                os.makedirs(ckdir, exist_ok=True)  # readers are the whole state
+            else:
+                model.save_pretrained(ckdir)
             torch.save({k: v for k, v in model.state_dict().items() if "mem_" in k},
-                       os.path.join(outdir, f"ckpt-{step}", "readers.pt"))
+                       os.path.join(ckdir, "readers.pt"))
         step += 1
         batch_qs = []
         if args.max_steps and step >= args.max_steps:

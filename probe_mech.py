@@ -42,11 +42,15 @@ def load_checkpoint(ckpt, args):
     model.config.use_cache = True
     ctx, _ = install_memory(model, write_layer=args.write_layer,
                             n_heads=args.read_heads, rank=args.read_rank)
-    model = PeftModel.from_pretrained(model, ckpt, is_trainable=False)
+    if os.path.exists(os.path.join(ckpt, "adapter_config.json")):
+        model = PeftModel.from_pretrained(model, ckpt, is_trainable=False)
+    else:
+        print("no adapter found — readers-only (--no-lora) checkpoint")
     readers = torch.load(os.path.join(ckpt, "readers.pt"),
                          map_location="cuda", weights_only=True)
     missing, unexpected = model.load_state_dict(readers, strict=False)
     assert not unexpected, f"unmatched reader keys: {unexpected[:3]}"
+    assert sum("mem_" in k for k in readers) == 32, "reader tensor count mismatch"
     n_loaded = sum("mem_" in k for k in readers)
     print(f"loaded adapter + {n_loaded} reader tensors from {ckpt}")
     model.eval()
