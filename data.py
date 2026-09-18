@@ -2,6 +2,7 @@
 
 import json
 import random
+import re
 
 from datasets import load_dataset
 
@@ -57,9 +58,11 @@ def make_probes(n: int = 200, seed: int = 1234, path: str = "probes.jsonl"):
 
 
 def score_probe(generation: str, bindings: dict) -> dict:
-    """Exact-substring recall per binding (city excluded: not requested in the note)."""
+    """Word-boundary exact recall per binding (city excluded: not requested in
+    the note). Boundary matters for numbers: '46' must not match '460'."""
     keys = ["name", "relname", "amount", "year", "item"]
-    return {k: (bindings[k] in generation) for k in keys}
+    return {k: bool(re.search(r"\b" + re.escape(bindings[k]) + r"\b", generation))
+            for k in keys}
 
 
 if __name__ == "__main__":

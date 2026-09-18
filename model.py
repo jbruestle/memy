@@ -27,6 +27,7 @@ class MemoryContext:
     def __init__(self):
         self.reads_enabled = False      # False => read heads are bypassed entirely (teacher / L0 / pass 1)
         self.collect_writes = False     # True during the user-turn pass
+        self.top_k = None               # int => each read keeps only its top-K scoring memories
         self.written = None             # (B, T, H) normalized write-site states, set by the write wrapper
         self.memory = None              # (B, N, H) memories visible to readers
         self.memory_mask = None         # (B, N) 1 = real memory, 0 = padding
@@ -70,6 +71,9 @@ class MemoryReader(nn.Module):
         scores = torch.einsum("bthr,bnhr->bhtn", q, k) / math.sqrt(self.rank)
         if mask is not None:
             scores = scores.masked_fill(~mask.bool()[:, None, None, :], torch.finfo(scores.dtype).min)
+        if ctx.top_k is not None and ctx.top_k < N:
+            kth = scores.topk(ctx.top_k, dim=-1).values[..., -1:]
+            scores = scores.masked_fill(scores < kth, torch.finfo(scores.dtype).min)
         p = F.softmax(scores.float(), dim=-1).to(v.dtype)  # (B, heads, T, N)
         if ctx.log_stats:
             with torch.no_grad():

@@ -241,6 +241,17 @@ digit recall). Priorities:
   ~1.6 nats, sharper than ~90% of base-model attention rows at similar
   context length (measured: attn mean 2.90/median 3.02 nats) — sharpness
   emerging WITHOUT sparsity regularization, de-risking top-K scaling.
+- **2026-09-18 (L2-readers @5000, 5090)** — FROZEN BASE + readers-only
+  (--no-lora, 42M params) works: recall 0.60 and climbing (vs v1 LoRA arm
+  0.875@4500; ~half speed). Gap is concentrated in arbitrary-symbol
+  bindings (name 0.22, amount 0.06 vs v1 0.875/0.75) while semantic/
+  structural bindings match (item 1.0, year 0.94, relname 0.78) ⇒ LoRA's
+  main contribution = making token IDENTITIES linearly retrievable from
+  layer-19 states. Same developmental sequence as v1 (placeholder →
+  typed confabulation → retrieval), stretched ~2x. Next: (a) let it run,
+  watch for plateau vs convergence; (b) detach arm is now the key
+  discriminator (directed write-gradients vs mere co-adaptation);
+  (c) tighten probe scoring to word-boundary before quoting numbers.
 - **2026-09-17 (REPL, ckpt ~7k)** — single-turn: REASONING OVER RETRIEVED
   BINDINGS works: 4 name-age pairs retrieved with zero cross-binding
   confusion, then compared correctly (youngest). Normalized read entropy
@@ -254,6 +265,92 @@ digit recall). Priorities:
   positive at this scale. Residual errors still prefix-correct/tail-lossy
   ("$34.00" for 344). City retrieved unprompted. Remaining for v1: the
   L0/L1 arms (train to matched step count) + mech battery on checkpoints.
+- **2026-09-18 (L2-v1 stopped @14k; top-K + exploration on ckpt-14000)** —
+  Stopped L2-v1 at 14k steps (eval_kl 0.113, recall 0.93); further gains
+  marginal given the readers-only arm's trajectory. Machine freed for
+  post-hoc work on ckpt-14000:
+  - **Top-K works with margin** (`probe_mech.py --modes topkN`; ctx.top_k
+    masks scores before softmax): full=0.94, topk8=0.93, topk4=0.94,
+    topk2=0.93, topk1=0.90. Only `amount` degrades at K=1 (0.88→0.69) —
+    multi-digit retrieval plausibly wants mass on several adjacent digit
+    memories. Sparse/ANN reads are viable; exact K to be retuned on the
+    readers-only model (higher read entropy). Sweep stopped after topk8;
+    meanpool/lasttoken/rank-k still not run.
+  - **Exploration harness** (`explore.py`, machine-usable REPL;
+    `explore_out/*.jsonl`). Findings, 8 probes/condition unless noted:
+    - *multiturn*: pure data/question chunk split costs ~20pt (0.97→0.78);
+      loss concentrates in bindings with no cue in the question chunk
+      (name 1.0→0.38, amount 0.88→0.50) while year/item stay 1.0.
+      position_ids continuation recovers about half (0.85) ⇒ position
+      collision is real but secondary. Read-on-ingest is NOT the problem
+      (0.85). An interposed assistant turn is the worst poison (0.57,
+      year 1.0→0.38). q-only control 0.23 (= relname leaking from the ask).
+    - *scale* (M name-age pairs): targeted "answer with just the number"
+      queries fail even at M=2-4 (~25%) while list-all is near-perfect at
+      M≤8 (1.0/0.88) and degrades by M=16-32 (ages 0.2-0.6, names 0.1 —
+      typed confabulation: "Yola"/"Pere"/"Hans"). Wrong answers are digit
+      blends not other pairs' ages (conf=0 throughout) — prefix/tail-lossy,
+      not cross-binding confusion. See cue-style follow-up below.
+    - *length* (probe early vs late in neutral filler): early placement
+      degrades slowly (0.95@400tok, 0.90@800, 0.80@1400); late placement
+      drops immediately past the 320-token training cap (0.82@400,
+      0.75@800, 0.72@1400). Write-position OOD, not bank size, is the
+      primary length bottleneck; name/year/item barely care, relname/amount
+      carry the entire drop.
+    - *cue follow-up* (`explore_cue.py`): targeted queries fail because the
+      READ QUERY IS COLD, not because the memory is gone. Same M name-age
+      bank, "answer with just the number" vs "start your answer with the
+      person's name" vs teacher-forcing "<Name> is": bare 4/9→2/9→0/9 at
+      M=4/8/16, but sentence 6/6/5 and forced 7/6/5. Retrieval is driven
+      by the generated prefix (the "Dear ___"→relname effect, now causal):
+      once the name token is in the stream, the paired age is retrievable
+      even at M=16. Answer-first formats were never trained (chatty KL
+      targets always restate context before answering). Implication for
+      v2: either train on short-answer formats, or rely on the model
+      restating cues — and note wrong answers are digit blends, so a
+      confidence/abstention signal may fall out of read sharpness.
+    - *distract* (probe + N ultrachat turns in bank): total collapse at
+      N=2 (recall 0.00) — the model coherently answers ONE distractor's
+      prompt (same answer regardless of which probe is present). Mission
+      selection from a multi-prompt bank is untrained and fails before
+      retrieval does. Directly motivates the v2 "question references the
+      target" / passage-bank training designs; top-K will not fix this.
+- **2026-09-18 (round 2, `explore2.py`)** — zero-training mitigation tests
+  on ckpt-14000, all essentially NEGATIVE — the failures are distributional
+  and need training, not inference tricks:
+  - *think block* (instructed recall-dump before answering, M=8/16 pairs):
+    does NOT rescue targeted queries (pair 2/6 vs bare 1/6) and the final
+    stated answer gets WORSE (1/6 and 0/6 vs bare 3/6): the model produces
+    a fluent, partially-confabulated list ("Nietzsche", "Pepper",
+    "Gertrude" for NAMES entries) and then answers self-consistently from
+    its own wrong list; it also drifts the question intent (answered "who
+    is oldest" instead of "how old is X"). An untrained think block is
+    bounded by list-recall accuracy AND compounds its errors. A trained
+    recall-preamble (teacher-forced from constructed transcripts, not
+    distilled teacher CoT) remains the interesting version.
+  - *chunked ingestion* (1300-token late-placement turn split into ~300-tok
+    separately-templated chunks): recall 0.17 vs 0.77 single-chunk. The
+    multi-chunk regime hurts far more than write-position OOD; intent
+    partially survives (it attempts the apology note) but binds to wrong
+    chunks' content (weaves journal filler into the note). No deployment
+    workaround via chunking until multi-chunk training exists.
+  - *mission capture* (probe + 8 distractors): probe-last 0.00 — expected
+    in hindsight, the read softmax is permutation-invariant over the bank,
+    so CROSS-CHUNK ORDER DOES NOT EXIST in this architecture (recency is
+    unrepresentable until order features are added; relevant to v2
+    update-semantics). topk4 0.03 — sparse reads don't fix capture. A
+    final redirect turn referencing the probe by name or by topic: 0.00
+    both; both conditions answer the SAME distractor (deterministic
+    salience capture, redirect ignored). USER_PROMPT_ALPHA-style
+    referencing has no untrained foothold — it must be trained in.
+    Strongest variant: teacher-forcing "Dear {relname}," under 8
+    distractors still only reaches 0.27 (name 0.17, amount 0.17) — the
+    model writes to the CORRECT addressee about the CAPTURED distractor's
+    topic ("Dear Obadiah, ... regarding the SEIU picket line"). A local
+    cue anchors local retrieval, but nothing gives generation a
+    chunk-level coherence prior, so the salient chunk keeps supplying the
+    mission. Hard-negative / distractor-bank training (v2 passage-bank
+    curriculum) is precisely the missing pressure.
 - **2026-09-16 (launch)** — L2 run (`runs/L2-v1`, batch 8) started. Step KL
   fluctuates ~0.4–0.6 (sample-dependent); judge progress by `eval_kl` on the
   held-out slice (every 250 steps ≈ 45 min), read_entropy vs its ~3.6

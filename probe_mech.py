@@ -104,6 +104,11 @@ def transform_memory(mem, mask, mode, spans=None):
 def run_mode(model, tok, ctx, args, probes, mode):
     pad_id = tok.pad_token_id
     device = next(model.parameters()).device
+    mem_mode = mode
+    ctx.top_k = None
+    if mode.startswith("topk"):  # read-time truncation, bank untouched
+        ctx.top_k = int(mode[4:])
+        mem_mode = "full"
     per_key, n, gens = {}, 0, []
     for p in probes:  # batch 1: transforms are per-sample anyway
         user_ids, open_ids = encode(tok, [p["question"]])
@@ -113,7 +118,7 @@ def run_mode(model, tok, ctx, args, probes, mode):
         ctx.collect_writes, ctx.reads_enabled = True, False
         model(input_ids=uids, attention_mask=umask, use_cache=False)
         ctx.collect_writes = False
-        mem, mmask = transform_memory(ctx.written, umask, mode, spans)
+        mem, mmask = transform_memory(ctx.written, umask, mem_mode, spans)
         ctx.memory, ctx.memory_mask = mem, mmask
         ctx.reads_enabled = True
         oids, omask = pad_batch([open_ids], pad_id, "left", device)
