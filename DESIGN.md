@@ -11,7 +11,9 @@ WildChat / MuSiQue / long-doc sources, then cloud.
 Files: `model.py` (surgery), `engine.py` (v2 executor: Sample -> chunks,
 passes, teacher, KL), `train_v2.py` (v2 loop: sampler, eval, probes,
 resume, DDP), `sources/` and `probes/` (plugins; see `TRAINING_V2.md`),
-`test_engine.py` (v1/v2 loss parity + multi-chunk smoke), `data.py`
+`test_engine.py` (v1/v2 loss parity + multi-chunk smoke), `peek_source.py`
+(inspect a source without the model), `cloud/` (RunPod bootstrap /
+teacher / launch / pod scripts + README), `data.py`
 (v1 ultrachat + probe generator), `train.py` (v1 loop, kept for parity
 checks), `test_step0.py` (identity test), `diag_mem.py` (per-phase VRAM
 watermarks), `probe_mech.py` (post-hoc mechanism battery), `chat.py`
@@ -504,3 +506,11 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   forward; regression added to `test_engine.py`. Next per Jeremy: remote
   training infrastructure, then the large run once the LoRA-rank
   ablation settles the rank.
+- **2026-09-22 (cloud plan)** — Provider/hardware advice recorded: cost per
+  FLOP is ~flat from 4090 ($0.4–0.7/h) through H100 ($2–2.7/h, RunPod)
+  to B200 ($5.9/h), so the knee is one full node data-parallel (sync is
+  70–280 MB/step; linear speedup at constant cost), not GPU type. Plan:
+  RunPod, network volume, 1×H100 calibration pod then 8×H100 (7 trainers
+  + 1 llama.cpp teacher GPU, nothing leaves the node); 4B run ≈ 15–20
+  H100-h ≈ $50, ~3 h wall-clock; 27B on 8×B200 later. Jeremy funded
+  $200. `cloud/` scripts written (untested until the first pod).

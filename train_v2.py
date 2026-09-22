@@ -342,7 +342,9 @@ def main():
 
     rank, world = int(os.environ.get("RANK", 0)), int(os.environ.get("WORLD_SIZE", 1))
     if world > 1:
-        dist.init_process_group("nccl")
+        # Long timeout: rank 0 runs eval + probes while the others wait at the barrier.
+        from datetime import timedelta
+        dist.init_process_group("nccl", timeout=timedelta(hours=3))
         torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
     device = torch.device("cuda")
     torch.manual_seed(args.seed + rank); random.seed(args.seed + rank)
