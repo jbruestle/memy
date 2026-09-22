@@ -477,3 +477,10 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   tok/s; single-stream decode 58 ms/step = time-sliced with the r=64
   ablation); expect >1k tok/s on an idle card. Next: `L2-v2-tags`
   (same run, `--turn-tags`) auto-launched to measure the tag cost.
+- **2026-09-22 (turn-tag cost: none)** — `runs/L2-v2-tags` (identical
+  to L2-v2-regress but `--turn-tags`): eval_kl 0.358 / 0.314 / 0.282 /
+  0.254 vs untagged 0.360 / 0.308 / 0.281 / 0.255 at 250 / 500 / 750 /
+  1000; recall 0.13 vs 0.15 at 1000. Tags are free at depth 1, as
+  expected (their value is cross-chunk ordering, untested here). Both
+  runs saved ckpt-500/1000. Tags stay on by default for the multi-source
+  run.

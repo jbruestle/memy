@@ -366,7 +366,8 @@ become a probe module. Only the KL eval is engine-native.
 3. Resume: DONE at smoke scale (4 steps, checkpoint, resume for 2 more:
    sampler cursor, optimizer, RNG restored). Kill-and-restart on the long
    run still to be exercised.
-4. Same run with tags on: measures the tag cost.
+4. Same run with tags on — DONE 2026-09-22 (`runs/L2-v2-tags`): no
+   measurable cost (eval_kl 0.254 vs 0.255 at step 1000).
 5. Add WildChat, MuSiQue, and the long-doc source; smoke-run each at
    batch 2 with small caps to measure s/sample and peak VRAM before the
    cloud budget is set.
