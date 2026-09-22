@@ -461,3 +461,19 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   more rank is valuable; this checks the endpoint rather than the speed).
   Result pending. The 5090 also hosts the llama.cpp teacher server for
   the local v2 runs (`--teacher-url`, Q8_0 GGUF, 16 slots).
+- **2026-09-22 (v2 harness regression PASSED)** — `runs/L2-v2-regress`:
+  new engine, ultrachat only, tags off, batch 8, teacher = llama.cpp Q8_0
+  on dev-5090 (`--teacher-url`, prefetch 4). Trajectory vs L2-v1
+  (eval_kl / probe recall): step 250 0.360/0.00 vs 0.342/0.00; 500
+  0.308/0.08 vs 0.292/0.06; 750 0.281/0.07 vs 0.263/0.09; 1000
+  0.255/0.15 vs 0.244/0.13. Same shape, same binding-acquisition order
+  (item first), eval_kl ~4% above v1 throughout — consistent with fresh
+  sampled eval targets (the v1 target file is not on this machine) and
+  v1's later sampling/entropy changes; qualitative parity is the agreed
+  bar. Teacher ceiling on the bindings probe: 1.0 on all five bindings.
+  A local-teacher run (`L2-v2-regress-local`, stopped at 315) gave
+  0.358 at step 250, i.e. the Q8 llama.cpp tokens are an equivalent
+  target. Remote teacher on the shared 5090 gave no speedup (~200–250
+  tok/s; single-stream decode 58 ms/step = time-sliced with the r=64
+  ablation); expect >1k tok/s on an idle card. Next: `L2-v2-tags`
+  (same run, `--turn-tags`) auto-launched to measure the tag cost.

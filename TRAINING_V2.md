@@ -359,9 +359,10 @@ become a probe module. Only the KL eval is engine-native.
    `runs/L2-v1/log.jsonl` (same data order, batch 8). Step-level parity
    is already exact (`test_engine.py`: v1 `training_step` and v2
    `student_loss` give the identical loss on the same batch and teacher
-   tokens). Trajectory run `runs/L2-v2-regress` IN PROGRESS 2026-09-21;
-   v1 reference: eval_kl 0.342 / 0.292 / 0.263 / 0.244 at steps
-   250 / 500 / 750 / 1000, recall 0.13 at 1000.
+   tokens). Trajectory run `runs/L2-v2-regress` PASSED 2026-09-22: eval_kl
+   0.360 / 0.308 / 0.281 / 0.255 vs v1 0.342 / 0.292 / 0.263 / 0.244 at
+   steps 250 / 500 / 750 / 1000; recall 0.15 vs 0.13 at 1000 (see
+   DESIGN decision log).
 3. Resume: DONE at smoke scale (4 steps, checkpoint, resume for 2 more:
    sampler cursor, optimizer, RNG restored). Kill-and-restart on the long
    run still to be exercised.
