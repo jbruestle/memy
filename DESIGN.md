@@ -1,11 +1,16 @@
 # Memy: memory as the only cross-chunk channel
 
-Status: v1 harness implemented and smoke-tested end to end (2026-09-16);
-ready to launch the L0/L1/L2 runs.
+Status (2026-09-21): v1 answered positive (L2-v1 stopped at 14k steps,
+eval_kl 0.113, probe recall 0.93; readers-only and writer-gradient
+ablations done, see decision log). v2 training plan is settled in
+`TRAINING_V2.md`; next is building the v2 harness (multi-chunk samples,
+three data sources) and running it on cloud GPUs.
 
 Files: `model.py` (surgery), `data.py` (ultrachat + probes), `train.py`
 (loop; `--arm L0|L1|L2`), `test_step0.py` (identity test), `diag_mem.py`
-(per-phase VRAM watermarks). Run with the `finetune` conda env and
+(per-phase VRAM watermarks), `probe_mech.py` (post-hoc mechanism battery),
+`chat.py` (REPL), `explore/` (exploration scripts + ultrachat sampler;
+run from repo root). Run with the `finetune` conda env and
 `PYTORCH_ALLOC_CONF=expandable_segments:True`.
 This doc is the cross-session source of truth. Update the decision log when anything changes.
 
@@ -24,6 +29,9 @@ Long-term memory for LLMs where:
 - **Chunking**: chunk = chat turn. Memories written in chunk n are visible from
   chunk n+1. **No cross-chunk attention at all** — normal (and linear) attention
   operates only within a chunk; all cross-chunk information flows through memory.
+  v2 adds *background chunks* (passages ingested against an empty bank) and
+  `[user turn k]:` / `[agent turn k]:` text tags as the only cross-chunk
+  order signal; see `TRAINING_V2.md`.
 - Theory: per-token cross-boundary information is small and already contextualized
   by mid-network; syntax/agreement is resolved in-chunk, so processed per-token
   states should suffice.
@@ -123,25 +131,25 @@ the value pathway learning gist transport before query sharpening.)
 L1/L0 arms deprioritized (single-vector hypothesis untenable given ordered-
 digit recall). Priorities:
 
-1. **Writer-gradient ladder** (gates everything): (i) end-to-end [current] /
-   (ii) detached [writes drift via shared LoRA, no memory signal] /
-   (iii) frozen writer [pass 1 = pure base weights]. If (iii ≈ i): memories
-   are precomputable per corpus → offline indexing + reader-only training.
+1. **Writer-gradient ladder** — DONE 2026-09-21: (i) end-to-end beats
+   (ii) detached and (iii) frozen writer at convergence; precomputable-
+   memories / reader-only branch deprioritized. v2 keeps full write
+   gradients (distractor chunks beyond the first 2 excepted, for cost).
 2. **Cheap post-hoc suite on existing checkpoints** (second machine ok):
    top-K sweep (predict K=8 lossless at entropy 1.6); site/head pruning map
    (predict sub-write-layer sites 3-15 matter least); read-rank SVD knee;
    readmaps; length generalization (600-1300 tok questions); contradiction
    + two-binding interference probes; empty-bank regression vs base.
-3. **Chat REPL**: exposes untrained assistant self-writes; qualitative.
-4. **Multi-turn training** on ultrachat conversations (chunk=turn, bank
-   accumulates): introduces self-writes + update-semantics pressure.
-5. **Passage-bank training** (the scaling play): teacher answers with the
-   relevant SHORT passage in context; student retrieves from a bank of N
-   precomputed passages (needs frozen writer). Distractor count = curriculum
-   knob; teacher writes the questions; hard negatives force discriminative
-   retrieval. Core principle: the teacher never needs long context, only the
-   right short context. Alt objective: sliding-window LM distillation
-   (teacher sees recent W tokens, student sees memory only).
+3. **Chat REPL** — DONE (`chat.py`, findings 2026-09-17).
+4. **Multi-turn training** — SUPERSEDED by `TRAINING_V2.md`: WildChat
+   (not ultrachat) as-is histories with a random cutoff turn.
+5. **Passage-bank training** — SUPERSEDED by `TRAINING_V2.md`: MuSiQue-Full
+   and Qasper supply real questions and gold annotations, passages are
+   written online with gradients (no frozen writer, no precompute), and the
+   distractor count is sampled per sample rather than scheduled. The core
+   principle survives unchanged: the teacher never needs long context, only
+   the right short context. Sliding-window LM distillation remains an
+   unexplored alternative objective.
 
 v2 training procedure spec (problem families, generation processes, eval
 sets, transcript structures): see `TRAINING_V2.md` (rewritten 2026-09-21).
@@ -149,12 +157,15 @@ sets, transcript structures): see `TRAINING_V2.md` (rewritten 2026-09-21).
 ## Deferred until the smoke test shows promise
 
 - ANN / metric-tree top-K search (Jeremy has existing O(log N) infrastructure);
-  during v1 training N≈300 so exact softmax is free.
+  v1 banks were N≈300 and v2 banks reach ~25k (Qasper, D=4), still cheap
+  for exact softmax; top-K sweep on ckpt-14000 showed K=1–8 lossless.
 - Sparsity/low-entropy regularization on read softmax (note: in tension with
   decay-mixing semantics — keep an unregularized arm when we get there).
 - Update semantics: per-query learned exponential decay over matches.
 - Explicit position/order features in memories (v1 relies on states being
-  causal-contextual; diagnose ordering failures via read maps first).
+  causal-contextual). v2 supplies order only via turn tags in the chunk
+  text; learned order features / recency stay deferred (needed for the
+  mission-capture failure, which v2 does not target).
 - Ablations: write layer (60% vs final vs multi-layer concat), MLPs around the
   read head, detached-writes arm (measures how much LoRA "learns to write"),
   number of read heads/sites.
@@ -169,7 +180,7 @@ sets, transcript structures): see `TRAINING_V2.md` (rewritten 2026-09-21).
   mismatch vs layer-19 memories, RoPE-contaminated metrics, and risk of
   landing in position-based attention basins that are meaningless over the
   memory bank. If ever tried, restrict to sites 19/23 where spaces align.
-- Multi-chunk histories (v1 is exactly two chunks).
+- ~~Multi-chunk histories (v1 is exactly two chunks).~~ In v2.
 
 ## Scaling to 27B: budget model (drafted 2026-09-21)
 
@@ -202,12 +213,16 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
 
 ## Hardware / environment
 
-- Local 4090 (24.5GB), 31GB RAM, 16 cores. Fits: ~10GB bf16 frozen weights +
-  ~70M trainable (LoRA + read heads, AdamW fp32 states ~0.9GB) + activations
-  1–2GB with checkpointing at batch 4–8 → ~13GB. No cloud needed; 4B stays
-  (no need to drop to 2B).
+- Two local machines: this box has a 4090 (24.5GB), 31GB RAM, 16 cores; a
+  second box has a 5090 (used for the readers-only arm). v1 fits on the
+  4090: ~10GB bf16 frozen weights + ~70M trainable (LoRA + read heads,
+  AdamW fp32 states ~0.9GB) + activations 1–2GB with checkpointing at
+  batch 4–8 → ~13GB. No cloud was needed for v1; 4B stays (no need to drop
+  to 2B). v2 goes to cloud for throughput, not memory.
 - Throughput: student fwd+bwd ~14 TFLOPs/sample + teacher forward ~5 → ~0.5–1.5
   s/sample; full epoch 1–2 days, expect signal within the first 20–50k samples.
+  These are v1 numbers (~600 tokens/sample). v2 samples are 1–25k tokens,
+  so the v2 run is planned for cloud GPUs (see `TRAINING_V2.md`, Compute).
 - Conda env: `finetune` (torch 2.10, transformers 5.2.0 — has native
   `Qwen3_5ForCausalLM` — peft 0.18.1, accelerate, datasets). No new env unless
   we hit a dependency conflict.
