@@ -143,6 +143,9 @@ digit recall). Priorities:
    right short context. Alt objective: sliding-window LM distillation
    (teacher sees recent W tokens, student sees memory only).
 
+v2 training procedure spec (problem families, generation processes, eval
+sets, transcript structures): see `TRAINING_V2.md` (rewritten 2026-09-21).
+
 ## Deferred until the smoke test shows promise
 
 - ANN / metric-tree top-K search (Jeremy has existing O(log N) infrastructure);
@@ -167,6 +170,35 @@ digit recall). Priorities:
   landing in position-based attention basins that are meaningless over the
   memory bank. If ever tried, restrict to sites 19/23 where spaces align.
 - Multi-chunk histories (v1 is exactly two chunks).
+
+## Scaling to 27B: budget model (drafted 2026-09-21)
+
+Long-term target: Qwen 3.8 27B. Compute is LINEAR in total tokens for any
+context we will use: the dense term is ~6N FLOPs/token (fwd+bwd with grad
+checkpointing; full backward is required because LoRA is everywhere and
+write-gradients matter) and the attention term 4·L_attn·d·ctx only matches
+it at ctx ≈ N/(2·L_attn·d) ≈ 160k tokens for a 27B hybrid. The bank read is
+bank×ctx×rank×heads — quadratic in history but ~1e-4 of the dense term.
+Sanity check vs the 4B run: 6·4B·600 = 14.4 TF/sample (doc: 14), teacher
+2N·600 = 4.8 (doc: 5); achieved ~14 TF/s ≈ 9% of 4090 peak — MFU is the
+dominant uncertainty.
+
+    FLOPs/token ≈ 8N   (6N student + 2N teacher logits; ~4N if writes frozen)
+    GPU-s       = samples × ctx × 8N / (MFU × peak)
+    $           = GPU-s / 3600 × $/GPU-h
+
+27B on one H100 (990 dense bf16 TF, 20% MFU, $2.5/h): ~900 tok/s, ~3.3M
+tok/GPU-h, ≈ $0.75 per million training tokens (band $0.3–3). 200k×1k-tok
+samples ≈ 60 GPU-h ≈ $150 (≈ $340 at today's 9% MFU); 1M×1k ≈ $750;
+1M×4k ≈ $3k. Anchor: 4B→27B is ~7× compute and 4090→H100 ~6× peak, so a
+27B run on one H100 feels like the current 4B run on the 4090 (~1–1.5
+s/sample, ~3 days per 200k). Teacher decode is bandwidth-bound and does not
+scale with tokens: pregenerate response tokens with vLLM (~$20 per 200k
+responses) and keep only the 2N logit forward inline. Card choice is
+memory-gated (54GB bf16 base + optimizer state + fp32 248k-vocab logits
+≈ 8GB at batch 8×1k): H100 80GB (default, single-GPU keeps harness
+unchanged), RTX Pro 6000 96GB (price it), H200/B200 only if within ~1.5×
+of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
 
 ## Hardware / environment
 
@@ -276,7 +308,7 @@ digit recall). Priorities:
     memories. Sparse/ANN reads are viable; exact K to be retuned on the
     readers-only model (higher read entropy). Sweep stopped after topk8;
     meanpool/lasttoken/rank-k still not run.
-  - **Exploration harness** (`explore.py`, machine-usable REPL;
+  - **Exploration harness** (`explore/explore.py`, machine-usable REPL;
     `explore_out/*.jsonl`). Findings, 8 probes/condition unless noted:
     - *multiturn*: pure data/question chunk split costs ~20pt (0.97→0.78);
       loss concentrates in bindings with no cue in the question chunk
@@ -297,7 +329,7 @@ digit recall). Priorities:
       0.75@800, 0.72@1400). Write-position OOD, not bank size, is the
       primary length bottleneck; name/year/item barely care, relname/amount
       carry the entire drop.
-    - *cue follow-up* (`explore_cue.py`): targeted queries fail because the
+    - *cue follow-up* (`explore/explore_cue.py`): targeted queries fail because the
       READ QUERY IS COLD, not because the memory is gone. Same M name-age
       bank, "answer with just the number" vs "start your answer with the
       person's name" vs teacher-forcing "<Name> is": bare 4/9→2/9→0/9 at
@@ -315,7 +347,7 @@ digit recall). Priorities:
       selection from a multi-prompt bank is untrained and fails before
       retrieval does. Directly motivates the v2 "question references the
       target" / passage-bank training designs; top-K will not fix this.
-- **2026-09-18 (round 2, `explore2.py`)** — zero-training mitigation tests
+- **2026-09-18 (round 2, `explore/explore2.py`)** — zero-training mitigation tests
   on ckpt-14000, all essentially NEGATIVE — the failures are distributional
   and need training, not inference tricks:
   - *think block* (instructed recall-dump before answering, M=8/16 pairs):
@@ -355,3 +387,20 @@ digit recall). Priorities:
   fluctuates ~0.4–0.6 (sample-dependent); judge progress by `eval_kl` on the
   held-out slice (every 250 steps ≈ 45 min), read_entropy vs its ~3.6
   near-uniform start, and probe recall. ~1.33 s/sample → 200k epoch ≈ 3 days.
+- **2026-09-21** — Further ablations (Jeremy): gradients through writes DO
+  matter for the recall plateau (end-to-end beats detached/frozen writer at
+  convergence, not just in speed), LoRA matters, and MORE LoRA rank is
+  valuable. Consequence: the "precomputable memories / reader-only" branch
+  of the v2 ladder is deprioritized; budget for the 27B target assumes full
+  backward (8N FLOPs/token) — see the scaling section. Still open: training
+  set work (TRAINING_V2.md) and remaining ablations before scaling up.
+- **2026-09-21 (v2 training plan)** — `TRAINING_V2.md` rewritten. Sources:
+  WildChat (multi-turn, as-is history, random cutoff t), MuSiQue (multi-doc,
+  chosen over HotpotQA: no single-paragraph shortcut), Qasper (long-doc,
+  chosen over QuALITY: 1,585 papers at ~5k tokens with evidence
+  annotations). Encoding: chunks tagged `[user turn k]:` / `[agent turn k]:`
+  (student only; teacher transcript untagged), background passages
+  ingested against an empty bank, positions restart per chunk, every chunk
+  writes, write-gradients kept for gold + first 2 distractors only.
+  Batches homogeneous in source and depth. Teacher inline, gold-context
+  only. Expected 5–10× v1 per-sample cost → cloud GPUs for this run.
