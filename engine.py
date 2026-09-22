@@ -390,3 +390,92 @@ def student_generate(model, ctx, encoder, enc_list, args, max_gen):
         ent = sum(s["entropy"] for s in ctx.stats) / max(len(ctx.stats), 1)
         ctx.clear()
     return trim_eos(out[:, ids.shape[1]:], encoder.eos_id), ent
+
+
+# ----------------------------------------------------------------- remote teacher
+
+class RemoteTeacher:
+    """Teacher generation on a llama.cpp server (`llama-server`), native
+    /completion endpoint: the prompt goes in as token ids and the generated
+    token ids come back, so no re-tokenization anywhere. Requests of one
+    batch are sent concurrently; the server does continuous batching."""
+
+    def __init__(self, url, eos_id, max_conc=16, timeout=600):
+        import concurrent.futures as cf
+        self.url, self.eos_id, self.timeout = url.rstrip("/"), eos_id, timeout
+        self.pool = cf.ThreadPoolExecutor(max_conc)
+
+    def _post(self, path, payload, retry_for=1800):
+        """POST with retries: a server restart (weights swap, more slots) must
+        not kill a training run. Retries for up to `retry_for` seconds."""
+        import json as _json
+        import time as _time
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(self.url + path, data=_json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
+        t0 = _time.time()
+        while True:
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                    return _json.loads(r.read())
+            except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+                if _time.time() - t0 > retry_for:
+                    raise
+                print(f"[remote teacher] {e}; retrying", flush=True)
+                _time.sleep(5)
+
+    def tokenize(self, text):
+        return self._post("/tokenize", {"content": text})["tokens"]
+
+    def _one(self, prompt, max_gen, greedy):
+        payload = {"prompt": prompt, "n_predict": max_gen, "return_tokens": True,
+                   "cache_prompt": False, "min_p": 0.0, "repeat_penalty": 1.0}
+        if greedy:
+            payload.update(temperature=0.0, top_k=1)
+        else:
+            payload.update(temperature=GEN_SAMPLING["temperature"], top_p=GEN_SAMPLING["top_p"],
+                           top_k=GEN_SAMPLING["top_k"])
+        r = self._post("/completion", payload)
+        toks = list(r["tokens"])
+        stopped_eos = r.get("stop_type") == "eos" or r.get("stopped_eos", False)
+        if stopped_eos and (not toks or toks[-1] != self.eos_id):
+            toks.append(self.eos_id)          # match HF: the target includes <|im_end|>
+        return toks[:max_gen]
+
+    def generate(self, prompts, max_gen, greedy=False):
+        futs = [self.pool.submit(self._one, p, max_gen, greedy) for p in prompts]
+        return [f.result() for f in futs]
+
+    def submit(self, prompts, max_gen, greedy=False):
+        """Non-blocking: returns a future whose .result() is the token lists."""
+        return self.pool.submit(self.generate, prompts, max_gen, greedy)
+
+
+class _Done:
+    def __init__(self, value):
+        self.value = value
+
+    def result(self):
+        return self.value
+
+
+class Teacher:
+    """Uniform front for local (inline HF generate) or remote generation.
+    `submit` is non-blocking for the remote teacher (prefetch), immediate
+    for the local one."""
+
+    def __init__(self, model, ctx, encoder, args):
+        self.model, self.ctx, self.encoder, self.args = model, ctx, encoder, args
+        self.remote = RemoteTeacher(args.teacher_url, encoder.eos_id) if args.teacher_url else None
+
+    def generate(self, prompts, greedy=False):
+        if self.remote:
+            return self.remote.generate(prompts, self.args.max_gen, greedy)
+        return teacher_generate(self.model, self.ctx, prompts, self.encoder.pad_id,
+                                self.encoder.eos_id, self.args.max_gen, greedy)
+
+    def submit(self, prompts, greedy=False):
+        if self.remote:
+            return self.remote.submit(prompts, self.args.max_gen, greedy)
+        return _Done(self.generate(prompts, greedy))

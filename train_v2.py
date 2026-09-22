@@ -23,8 +23,8 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 import probes as probe_registry
 import sources as source_registry
-from engine import (Encoder, build_model, student_generate, student_loss,
-                    teacher_generate, teacher_logits)
+from engine import (Encoder, Teacher, build_model, student_generate, student_loss,
+                    teacher_logits)
 
 
 # ----------------------------------------------------------------- config
@@ -76,13 +76,19 @@ class Sampler:
         self.encoded = {n: {} for n, *_ in sources}   # depth -> [Encoded] (parallel to queue)
         self.iters = {}
         self.dropped = 0
+        self.pending = []     # [(name, [Encoded])] restored from a checkpoint; emitted first
 
-    def state_dict(self):
-        return {"state": self.state, "rng": self.rng.getstate()}
+    def state_dict(self, pending=()):
+        """pending: [(name, [Encoded])] pulled but not yet trained on (prefetch);
+        stored raw so a resume trains on them first, in order."""
+        return {"state": self.state, "rng": self.rng.getstate(),
+                "pending": [(n, [e.sample for e in encs]) for n, encs in pending]}
 
     def load_state_dict(self, sd):
         self.state = sd["state"]
         self.rng.setstate(sd["rng"])
+        self.pending = [(n, [self.encoder.encode(x) for x in samples])
+                        for n, samples in sd.get("pending", [])]
         for name, st in self.state.items():
             self.encoded[name] = {int(d): [self.encoder.encode(s) for s in q]
                                   for d, q in st["queue"].items()}
@@ -116,6 +122,8 @@ class Sampler:
 
     def next_batch(self):
         """Returns (source name, [Encoded]) or None when every source is done."""
+        if self.pending:
+            return self.pending.pop(0)
         while True:
             live = [(n, w) for n, w, *_ in self.sources if not self.state[n]["done"]]
             if not live:
@@ -165,7 +173,7 @@ def import_v1_eval_targets(cache, samples, path="runs/eval-targets.json"):
             cache.setdefault(s["id"], g)
 
 
-def run_eval(model, ctx, encoder, sources, args, cache_path):
+def run_eval(model, ctx, encoder, teacher, sources, args, cache_path):
     cache = load_cache(cache_path)
     out = {}
     for name, _, module, cfg in sources:
@@ -182,8 +190,7 @@ def run_eval(model, ctx, encoder, sources, args, cache_path):
                 chunk = group[j:j + args.batch]
                 missing = [e for e in chunk if e.sample["id"] not in cache]
                 if missing:
-                    gens = teacher_generate(model, ctx, [e.prompt for e in missing],
-                                            encoder.pad_id, encoder.eos_id, args.max_gen)
+                    gens = teacher.generate([e.prompt for e in missing])
                     for e, g in zip(missing, gens):
                         cache[e.sample["id"]] = g
                     json.dump(cache, open(cache_path, "w"))
@@ -199,7 +206,7 @@ def run_eval(model, ctx, encoder, sources, args, cache_path):
     return out
 
 
-def run_probes(model, ctx, encoder, probes, args, step, outdir, cache_path):
+def run_probes(model, ctx, encoder, teacher, probes, args, step, outdir, cache_path):
     cache = load_cache(cache_path)
     logs = {}
     for module, cfg in probes:
@@ -213,8 +220,7 @@ def run_probes(model, ctx, encoder, probes, args, step, outdir, cache_path):
             chunk = encs[j:j + args.batch]
             missing = [e for e in chunk if e.sample["id"] not in cache]
             if missing:
-                gens = teacher_generate(model, ctx, [e.prompt for e in missing],
-                                        encoder.pad_id, encoder.eos_id, args.max_gen, greedy=True)
+                gens = teacher.generate([e.prompt for e in missing], greedy=True)
                 for e, g in zip(missing, gens):
                     cache[e.sample["id"]] = encoder.tok.decode(g, skip_special_tokens=True)
                 json.dump(cache, open(cache_path, "w"))
@@ -233,7 +239,7 @@ def run_probes(model, ctx, encoder, probes, args, step, outdir, cache_path):
 
 # ----------------------------------------------------------------- checkpoints
 
-def save_ckpt(outdir, step, model, opt, sched, sampler, args, rank):
+def save_ckpt(outdir, step, model, opt, sched, sampler, args, rank, pending=()):
     ckdir = os.path.join(outdir, f"ckpt-{step}")
     os.makedirs(ckdir, exist_ok=True)
     if rank == 0:
@@ -245,7 +251,7 @@ def save_ckpt(outdir, step, model, opt, sched, sampler, args, rank):
                                   if p.requires_grad},
                     "opt": opt.state_dict(), "sched": sched.state_dict(), "step": step,
                     "args": vars(args)}, os.path.join(ckdir, "state.pt"))
-    torch.save({"sampler": sampler.state_dict(),
+    torch.save({"sampler": sampler.state_dict(pending),
                 "rng": {"py": random.getstate(), "torch": torch.get_rng_state(),
                         "cuda": torch.cuda.get_rng_state()}},
                os.path.join(ckdir, f"sampler-rank{rank}.pt"))
@@ -306,6 +312,10 @@ def main():
     ap.add_argument("--token-budget", type=int, default=0, help="max chunk tokens per batch (0 = off)")
     ap.add_argument("--bg-tokens", type=int, default=16384, help="background micro-batch padded tokens")
     ap.add_argument("--max-gen", type=int, default=300, help="per-turn teacher generation cap")
+    ap.add_argument("--teacher-url", default=None,
+                    help="llama.cpp server for teacher generation; default: inline HF generate")
+    ap.add_argument("--teacher-prefetch", type=int, default=1,
+                    help="batches requested ahead of training (remote teacher only)")
     ap.add_argument("--max-chunk-tokens", type=int, default=0, help="drop samples with a longer chunk (0 = off)")
     ap.add_argument("--max-prompt-tokens", type=int, default=0, help="drop samples with a longer teacher transcript")
     ap.add_argument("--distractor-grad-k", type=int, default=2)
@@ -374,18 +384,36 @@ def main():
     # Teacher targets depend on the generation cap; keep caches per cap.
     eval_cache = os.path.join("runs", f"eval-targets-v2-g{args.max_gen}.json")
     probe_cache = os.path.join("runs", f"probe-teacher-v2-g{args.max_gen}.json")
+    teacher = Teacher(model, ctx, encoder, args)
 
+    def pull():
+        nb = sampler.next_batch()
+        return (nb[0], nb[1], teacher.submit([e.prompt for e in nb[1]])) if nb else None
+
+    depth = max(args.teacher_prefetch, 1) if args.teacher_url else 1
+    pending, exhausted = [], False   # remote: generations run while earlier batches train
+
+    def fill():
+        nonlocal exhausted
+        while not exhausted and len(pending) < depth:
+            nb = pull()
+            if nb is None:
+                exhausted = True
+            else:
+                pending.append(nb)
+
+    fill()
     while True:
         if args.max_steps and step >= args.max_steps:
             break
-        nb = sampler.next_batch()
-        if sync_flag(nb is None, world, device):
+        if sync_flag(not pending, world, device):
             log({"exhausted": True, "step": step})
             break
-        name, encs = nb
+        name, encs, fut = pending.pop(0)
         t0 = time.time()
-        gens = teacher_generate(model, ctx, [e.prompt for e in encs], encoder.pad_id,
-                                encoder.eos_id, args.max_gen)
+        gens = fut.result()
+        t_wait = time.time() - t0
+        fill()
         t_logits = teacher_logits(model, ctx, [e.prompt for e in encs], gens, encoder.pad_id)
         t1 = time.time()
         loss, n_tok, stats, info = student_loss(model, ctx, encoder, encs, gens, t_logits,
@@ -398,7 +426,8 @@ def main():
         step += 1
         rec = {"step": step, "src": name, "kl": float(loss.detach()), "tokens": n_tok,
                "n": len(encs), "chunk_tokens": sum(e.tokens for e in encs), **info,
-               "sec": round(time.time() - t0, 2), "teacher_sec": round(t1 - t0, 2)}
+               "sec": round(time.time() - t0, 2), "teacher_sec": round(t1 - t0, 2),
+               "teacher_wait": round(t_wait, 2)}
         if stats:
             rec["read_entropy"] = round(sum(s["entropy"] for s in stats) / len(stats), 3)
         log(rec)
@@ -406,8 +435,9 @@ def main():
 
         if step % args.eval_interval == 0:
             if rank == 0:
-                ev = run_eval(model, ctx, encoder, sources, args, eval_cache)
-                pr = run_probes(model, ctx, encoder, probes, args, step, outdir, probe_cache)
+                ev = run_eval(model, ctx, encoder, teacher, sources, args, eval_cache)
+                pr = run_probes(model, ctx, encoder, teacher, probes, args, step, outdir,
+                                probe_cache)
                 rec = {"step": step, "eval_kl": ev, "probe": pr, "dropped": sampler.dropped}
                 print({**rec, "probe": {k: {kk: vv for kk, vv in v.items() if kk != "sample"}
                                         for k, v in pr.items()}}, flush=True)
@@ -415,11 +445,13 @@ def main():
             if world > 1:
                 dist.barrier()
         if step % args.save_interval == 0:
-            save_ckpt(outdir, step, model, opt, sched, sampler, args, rank)
+            save_ckpt(outdir, step, model, opt, sched, sampler, args, rank,
+                      pending=[(n, e) for n, e, _ in pending])
             if world > 1:
                 dist.barrier()
     if step % args.save_interval:
-        save_ckpt(outdir, step, model, opt, sched, sampler, args, rank)
+        save_ckpt(outdir, step, model, opt, sched, sampler, args, rank,
+                  pending=[(n, e) for n, e, _ in pending])
     log({"done": True, "step": step})
     if world > 1:
         dist.destroy_process_group()
