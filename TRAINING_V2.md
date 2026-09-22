@@ -270,7 +270,8 @@ Sample = {
   "distractors": [str, ...],     # passages in the bank only
   "turns": [("user", str), ("assistant", str), ..., ("user", str)],  # ends on the target's user turn
   "meta": {...},                 # optional: answer (EM/F1), evidence (readmaps), anything the probe wants back
-}
+  "teacher_gold": [str, ...],    # optional: what the TEACHER sees instead of gold (Qasper: evidence
+}                                #   paragraphs, while the bank holds the whole paper)
 ```
 
 The teacher transcript is derived by the engine, never by the dataset:
@@ -282,6 +283,10 @@ ultrachat (no gold, one turn — the v1 degenerate case).
 
 ### Dataset plugin
 
+`python peek_source.py <name> [--split eval] [--stats N] [--tags] [--cfg k=v]`
+prints Samples as the engine encodes them (per-chunk token counts,
+teacher prompt length) or length statistics, without loading the model —
+sources are built and debugged in isolation from training.
 `sources/<name>.py` exposes `train(cfg, seed, epoch, start, shard)` (an iterator of
 Samples in a deterministic per-seed-per-epoch permutation, so resume is an
 index), `eval(cfg)` (a fixed slice), and its own knobs (distractor range,
@@ -410,6 +415,26 @@ Decisions made while building, beyond the contract above:
   which teacher generation is 8.8 s. Generation is ~85% of the step, not
   "roughly doubles" as v1 estimated; at scale the tokens-only vLLM
   pregeneration is the first optimization to make, not a fallback.
+
+### Sources built (2026-09-21)
+
+All four planned sources exist and were checked through `peek_source.py`
+(CPU only). Measured on 200–300 training samples each, default cfg:
+
+| source | items | tokens/sample (mean, p90) | max chunk (p90) | bank chunks | notes |
+|---|---|---|---|---|---|
+| ultrachat | 200k | ~300 | 320 | 1 | v1 data |
+| wildchat | 838k rows (English non-toxic multi-turn subset) | 0.9k, 2.6k | 1.1k | 2t+1 (depth p50 3, p90 9, max 31) | cutoff t per (seed, epoch, row); ~1/3 of samples are depth 1 |
+| musique | 39.9k train / 4.8k dev (full) | 1.4k, 2.5k | 355 | 1–20 | unanswerables 15.1% realized (keep-prob computed from split counts); MuSiQue's supporting-paragraph annotations are occasionally noisy (answer not in gold) |
+| qasper | 888 papers / 2.6k q train, 281 / 1k dev | 15.3k, 23k | 8.0k | 1–5 | papers > `max_paper_tokens` (8192) dropped; teacher sees evidence only via `teacher_gold`; a run must set `--max-chunk-tokens` ≥ 8192 |
+
+Details: `bdsaglam/musique` (default config = MuSiQue-Full), `allenai/qasper`
+via its `refs/convert/parquet` revision (the script loader is unsupported
+by datasets 4.x), `allenai/WildChat-1M` (non-toxic release, 3.4GB parquet).
+Eval slices: ultrachat/wildchat = first `n_eval` eligible train rows
+(skipped by train); musique/qasper = the validation split. Per-sample
+randomness (cutoff, distractor draws) is seeded by (seed, epoch, id) so a
+resumed stream reproduces its draws.
 
 ### Open: long-document source
 

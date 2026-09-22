@@ -6,6 +6,9 @@ A Sample is a dict:
     source      dataset / probe name
     gold        [passage, ...]   in the bank AND in the teacher context
     distractors [passage, ...]   in the bank only
+    teacher_gold optional [passage, ...]: what the teacher sees INSTEAD of
+                gold (e.g. Qasper: bank holds the whole paper, the teacher
+                gets only the annotated evidence paragraphs)
     turns       [(role, text), ...]  alternating, ending on the target's user turn
     meta        anything the source / probe wants back (answer, bindings, ...)
 
@@ -207,8 +210,9 @@ class Encoder:
         prefix = self.tok(f"[agent turn {na}]:\n", add_special_tokens=False).input_ids \
             if self.turn_tags else []
         msgs = [{"role": r, "content": t} for r, t in turns]
-        if gold:
-            msgs[0]["content"] = READ_WRAP + "\n\n".join(gold) + "\n\n" + msgs[0]["content"]
+        tgold = sample.get("teacher_gold", gold)
+        if tgold:
+            msgs[0]["content"] = READ_WRAP + "\n\n".join(tgold) + "\n\n" + msgs[0]["content"]
         prompt = self.tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True,
                                               enable_thinking=False)["input_ids"]
         chunks = bg + hist
