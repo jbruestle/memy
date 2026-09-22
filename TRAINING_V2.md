@@ -426,7 +426,8 @@ All four planned sources exist and were checked through `peek_source.py`
 | ultrachat | 200k | ~300 | 320 | 1 | v1 data |
 | wildchat | 838k rows (English non-toxic multi-turn subset) | 0.9k, 2.6k | 1.1k | 2t+1 (depth p50 3, p90 9, max 31) | cutoff t per (seed, epoch, row); ~1/3 of samples are depth 1 |
 | musique | 39.9k train / 4.8k dev (full) | 1.4k, 2.5k | 355 | 1–20 | unanswerables 15.1% realized (keep-prob computed from split counts); MuSiQue's supporting-paragraph annotations are occasionally noisy (answer not in gold) |
-| qasper | 888 papers / 2.6k q train, 281 / 1k dev | 15.3k, 23k | 8.0k | 1–5 | papers > `max_paper_tokens` (8192) dropped; teacher sees evidence only via `teacher_gold`; a run must set `--max-chunk-tokens` ≥ 8192 |
+| qasper | 888 papers / 2.6k q train, 281 / 1k dev | 15.3k, 23k | 8.0k | 1–5 | papers > `max_paper_tokens` (8192) dropped; teacher sees evidence only via `teacher_gold`; a run must set `--max-chunk-tokens` ≥ 8192. Demoted: small weight or eval-only (see below) |
+| triviaqa | 77.6k q train / 7.9k dev (rc.wikipedia) | 11.6k, 21.9k | 4.1k | 1–11 | pages split at paragraph boundaries into ≤ `chunk_tokens` (4096) passages; rows with gold > `max_gold_tokens` (16384) or no alias hit dropped (75% kept); `teacher_gold` = lead paragraph + ≤3 alias-hit paragraphs per page (distant supervision) |
 
 Details: `bdsaglam/musique` (default config = MuSiQue-Full), `allenai/qasper`
 via its `refs/convert/parquet` revision (the script loader is unsupported
@@ -436,12 +437,23 @@ Eval slices: ultrachat/wildchat = first `n_eval` eligible train rows
 randomness (cutoff, distractor draws) is seeded by (seed, epoch, id) so a
 resumed stream reproduces its draws.
 
-### Open: long-document source
+### Long-document source: TriviaQA replaces Qasper (2026-09-21)
 
 Qasper is small (2,593 train questions ⇒ ~15 epochs at a 20% slice over
-200k samples) and single-subject. Leading replacement: Natural Questions
-with the original Wikipedia pages (diverse topics, hundreds of thousands
-of items, annotated long-answer paragraph as evidence, other pages as
-distractors). To check before committing: page-length distribution
-against the 5k chunk cap. Qasper may stay at a small weight or move to
-eval only. The plugin design makes this a later, independent decision.
+200k samples) and single-subject. Survey of alternatives with working
+loaders: TriviaQA rc.wikipedia (77.6k questions, 1–3 whole Wikipedia
+pages each, answer aliases, no evidence annotation), Natural Questions
+(best content fit — annotated long-answer paragraph — but the full train
+set is 41GB and the parquet conversion holds only 18k train rows; HTML
+must be stripped; kept as a later upgrade), SQuAD reassembled into ~5k-token
+articles (442 articles, 87k questions, exact evidence paragraph — cheap
+secondary candidate, not built), NarrativeQA (only the ~1.2k-token
+summaries are usable), QuAC (multi-turn QA over ~700-token Wikipedia
+sections; loader unverified). Decision: `sources/triviaqa.py` built and
+takes the long-doc slot; Qasper stays available at a small weight or as
+eval. TriviaQA design note: the first version dropped whole pages over a
+cap, which preferentially removed the relevant page (e.g. the Angola
+question kept only "Nation state" because "Portugal" appears in it);
+pages are now split into capped chunks and the cap applies to total gold
+tokens instead. Page lengths (652 sampled): p50 6.3k, p90 14.7k tokens;
+36% ≤ 4k, 62% ≤ 8k, 93% ≤ 16k.
