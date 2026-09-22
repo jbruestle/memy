@@ -17,16 +17,20 @@ PORT=${PORT:-8080}
 # TEACHER=vllm (default; ~7x llama.cpp's generation throughput on Qwen3.5's hybrid
 # layers, measured 2026-09-22) or TEACHER=llamacpp. On a 1-GPU pod cap vLLM's memory
 # share so the trainer fits (MEM, default 0.3 there).
+# SHARE_TEACHER=1: train on ALL GPUs and co-locate the teacher on the last one
+# (vLLM at MEM=0.3; ~1% teacher wait measured at batch 8). Default on small
+# pods (<= 2 GPUs), where a dedicated teacher GPU would sit mostly idle.
+SHARE=${SHARE_TEACHER:-$([ "$NGPU" -le 2 ] && echo 1 || echo 0)}
 if [ "${TEACHER:-vllm}" = vllm ]; then
-  MEM=${MEM:-$([ "$NGPU" -gt 1 ] && echo 0.85 || echo 0.3)} bash cloud/teacher_vllm.sh
+  MEM=${MEM:-$([ "$SHARE" = 1 ] && echo 0.3 || echo 0.85)} bash cloud/teacher_vllm.sh
 else
   bash cloud/teacher.sh
 fi
-if [ "$NGPU" -gt 1 ]; then
+if [ "$SHARE" = 1 ] || [ "$NGPU" -eq 1 ]; then
+  NTRAIN=$NGPU
+else
   NTRAIN=$((NGPU - 1))
   export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NTRAIN - 1)))
-else
-  NTRAIN=1
 fi
 RUN=$(printf '%s\n' "$@" | grep -A1 -x -- '--run-name' | tail -1 || echo run)
 echo "trainers: $NTRAIN GPU(s) [${CUDA_VISIBLE_DEVICES:-all}]; teacher :$PORT; log runs/$RUN-console.log"
