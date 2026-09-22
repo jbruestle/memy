@@ -408,26 +408,40 @@ class RemoteTeacher:
         import concurrent.futures as cf
         self.url, self.eos_id, self.timeout = url.rstrip("/"), eos_id, timeout
         self.pool = cf.ThreadPoolExecutor(max_conc)
+        props = self._post("/props", {}, method="GET")
+        self.n_ctx = int(props.get("default_generation_settings", {}).get("n_ctx", 0)) or None
+        self.slots = props.get("total_slots")
 
-    def _post(self, path, payload, retry_for=1800):
-        """POST with retries: a server restart (weights swap, more slots) must
-        not kill a training run. Retries for up to `retry_for` seconds."""
+    def fits(self, prompt, max_gen):
+        """Whether prompt + generation fits one server slot."""
+        return self.n_ctx is None or len(prompt) + max_gen <= self.n_ctx
+
+    def _post(self, path, payload, retry_for=1800, method="POST"):
+        """Request with retries on connection loss / 5xx: a server restart
+        (weights swap, more slots) must not kill a training run. Client
+        errors (4xx, e.g. prompt exceeds the slot context) raise at once."""
         import json as _json
         import time as _time
         import urllib.error
         import urllib.request
-        req = urllib.request.Request(self.url + path, data=_json.dumps(payload).encode(),
+        data = _json.dumps(payload).encode() if method == "POST" else None
+        req = urllib.request.Request(self.url + path, data=data, method=method,
                                      headers={"Content-Type": "application/json"})
         t0 = _time.time()
         while True:
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as r:
                     return _json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                if 400 <= e.code < 500:
+                    raise RuntimeError(f"remote teacher {e.code}: {e.read().decode()[:300]}") from None
+                err = e
             except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
-                if _time.time() - t0 > retry_for:
-                    raise
-                print(f"[remote teacher] {e}; retrying", flush=True)
-                _time.sleep(5)
+                err = e
+            if _time.time() - t0 > retry_for:
+                raise err
+            print(f"[remote teacher] {err}; retrying", flush=True)
+            _time.sleep(5)
 
     def tokenize(self, text):
         return self._post("/tokenize", {"content": text})["tokens"]
@@ -464,22 +478,51 @@ class _Done:
         return self.value
 
 
+class _Merged:
+    """Remote future for the prompts that fit the server + local results for
+    the rest, reassembled in prompt order."""
+
+    def __init__(self, n, remote_idx, remote_fut, local):
+        self.n, self.remote_idx, self.remote_fut, self.local = n, remote_idx, remote_fut, local
+
+    def result(self):
+        out = dict(self.local)
+        if self.remote_fut is not None:
+            for i, g in zip(self.remote_idx, self.remote_fut.result()):
+                out[i] = g
+        return [out[i] for i in range(self.n)]
+
+
 class Teacher:
     """Uniform front for local (inline HF generate) or remote generation.
     `submit` is non-blocking for the remote teacher (prefetch), immediate
-    for the local one."""
+    for the local one. Prompts too long for a remote slot (prompt + max_gen
+    > the server's n_ctx) are generated locally; `self.n_local` counts them."""
 
     def __init__(self, model, ctx, encoder, args):
         self.model, self.ctx, self.encoder, self.args = model, ctx, encoder, args
         self.remote = RemoteTeacher(args.teacher_url, encoder.eos_id) if args.teacher_url else None
-
-    def generate(self, prompts, greedy=False):
+        self.n_local = 0
         if self.remote:
-            return self.remote.generate(prompts, self.args.max_gen, greedy)
+            print(f"[remote teacher] {args.teacher_url}: {self.remote.slots} slots, "
+                  f"n_ctx {self.remote.n_ctx}", flush=True)
+
+    def _local(self, prompts, greedy):
         return teacher_generate(self.model, self.ctx, prompts, self.encoder.pad_id,
                                 self.encoder.eos_id, self.args.max_gen, greedy)
 
     def submit(self, prompts, greedy=False):
-        if self.remote:
-            return self.remote.submit(prompts, self.args.max_gen, greedy)
-        return _Done(self.generate(prompts, greedy))
+        if not self.remote:
+            return _Done(self._local(prompts, greedy))
+        ridx = [i for i, p in enumerate(prompts) if self.remote.fits(p, self.args.max_gen)]
+        lidx = [i for i in range(len(prompts)) if i not in set(ridx)]
+        fut = self.remote.submit([prompts[i] for i in ridx], self.args.max_gen, greedy) \
+            if ridx else None
+        local = {}
+        if lidx:
+            self.n_local += len(lidx)
+            local = dict(zip(lidx, self._local([prompts[i] for i in lidx], greedy)))
+        return _Merged(len(prompts), ridx, fut, local)
+
+    def generate(self, prompts, greedy=False):
+        return self.submit(prompts, greedy).result()

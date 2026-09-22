@@ -484,3 +484,12 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   expected (their value is cross-chunk ordering, untested here). Both
   runs saved ckpt-500/1000. Tags stay on by default for the multi-source
   run.
+- **2026-09-22 (all v2 sources smoke-tested on GPU)** — wildchat,
+  musique, qasper, triviaqa each ran 20 steps at batch 2 with tags,
+  chunk cap 8192, remote teacher, eval + probes: all clean. Long-doc
+  sources: ~25–29k chunk tokens/step, banks up to 23.5k memories, peak
+  18–20 GB at batch 2 on the 4090 (table in TRAINING_V2.md). Remote
+  teacher client fixed: 4xx (prompt over the server's slot context) no
+  longer retried; such prompts fall back to local generation. Harness is
+  ready for the multi-source run; remaining before cloud: server `-c`
+  large enough for WildChat prompts, DDP on >1 GPU, mixture weights.

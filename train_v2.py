@@ -427,7 +427,9 @@ def main():
         rec = {"step": step, "src": name, "kl": float(loss.detach()), "tokens": n_tok,
                "n": len(encs), "chunk_tokens": sum(e.tokens for e in encs), **info,
                "sec": round(time.time() - t0, 2), "teacher_sec": round(t1 - t0, 2),
-               "teacher_wait": round(t_wait, 2)}
+               "teacher_wait": round(t_wait, 2),
+               "peak_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
+               "teacher_local": teacher.n_local}
         if stats:
             rec["read_entropy"] = round(sum(s["entropy"] for s in stats) / len(stats), 3)
         log(rec)

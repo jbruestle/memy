@@ -368,13 +368,39 @@ become a probe module. Only the KL eval is engine-native.
    run still to be exercised.
 4. Same run with tags on — DONE 2026-09-22 (`runs/L2-v2-tags`): no
    measurable cost (eval_kl 0.254 vs 0.255 at step 1000).
-5. Add WildChat, MuSiQue, and the long-doc source; smoke-run each at
-   batch 2 with small caps to measure s/sample and peak VRAM before the
-   cloud budget is set.
+5. Per-source smoke runs — DONE 2026-09-22 (`runs/smoke-<source>`, 20
+   steps each, batch 2, tags on, chunk cap 8192, remote teacher, eval +
+   probes exercised; all exit 0). Measured on the 4090:
 
-### Implementation notes (2026-09-21)
+   | source | s/step (batch 2) | chunk tokens/step | bank max | peak VRAM |
+   |---|---|---|---|---|
+   | wildchat | 5.2 | 1.5k | 2.5k | 12.6 GB |
+   | musique | 4.2 | 3.1k | 2.5k | 13.0 GB |
+   | qasper | 11.0 | 29k | 23.5k | 18.4 GB |
+   | triviaqa | 7.5 | 25k | 23.0k | 20.2 GB |
+
+   So ~5 s per 15k-token long-doc sample on the 4090 with the teacher
+   hidden; the long-doc sources need batch ≤ 2 on 24GB and are fine at
+   batch 8 on 80GB. WildChat prompts beyond the teacher server's slot
+   context (2048 here) fall back to local generation automatically
+   (6 of 40 in the smoke run); a bigger `-c` on the server removes that.
+
+### Implementation notes (2026-09-21/22)
 
 Decisions made while building, beyond the contract above:
+
+- **Remote teacher** (`--teacher-url`, llama.cpp `llama-server`): prompt
+  token ids in, generated ids out via the native `/completion` endpoint
+  (tokenizer parity with HF verified exactly), `--teacher-prefetch N`
+  batches requested ahead so the server's continuous batching stays
+  saturated independent of the trainer's batch; prefetched batches are
+  stored raw in the checkpoint and replayed on resume. Prompts that do
+  not fit a server slot (prompt + max_gen > n_ctx, read from `/props`)
+  are generated locally; 4xx errors raise, connection loss / 5xx retry
+  for 30 min (server restarts survive). On the shared 5090 the server
+  gave ~200–250 tok/s (single-stream decode 58 ms/step = time-sliced
+  with another training job), no speedup over inline; the design needs
+  an uncontended card to hide the teacher entirely.
 
 - **Write passes stop at the write site.** `MemoryContext.write_only`
   makes every wrapper above layer 19 return its input unchanged, and the
