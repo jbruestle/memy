@@ -71,6 +71,13 @@ def main():
     model.zero_grad(set_to_none=True)
     out, ent = student_generate(model, ctx, enc, [e], ARGS, max_gen=24)
     print("student generation:", repr(tok.decode(out[0], skip_special_tokens=True)), f"ent {ent:.2f}")
+
+    # --- 3. generate() must not poison later forwards of a different batch size
+    # (Qwen3.5 caches rope_deltas per batch; engine clears it).
+    from engine import write_pass
+    ws = write_pass(model, ctx, [e.bg[0], e.bg[1], e.turns[0]], None, enc.pad_id, grad=False)
+    assert len(ws) == 3 and all(w.shape[-1] == ws[0].shape[-1] for w in ws)
+    print("write pass of 3 chunks after a batch-1 generate: ok")
     print("PASS")
 
 

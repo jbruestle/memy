@@ -493,3 +493,14 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   longer retried; such prompts fall back to local generation. Harness is
   ready for the multi-source run; remaining before cloud: server `-c`
   large enough for WildChat prompts, DDP on >1 GPU, mixture weights.
+- **2026-09-22 (copy source; mrope cache bug)** — Added the verbatim-copy
+  source/probe pair (`sources/copy.py`, `probes/copy.py`; design in
+  TRAINING_V2.md) to train content-addressed lookup + sequential readout.
+  Found and fixed an engine bug on the way: Qwen3.5 `generate()` caches a
+  per-batch `rope_deltas` on the inner model and later plain forwards
+  reuse it (silently when batch sizes divide, a shape error otherwise —
+  it crashed the first background pass of a different batch size after a
+  probe generate). `engine.inner_model()` now clears it before every
+  forward; regression added to `test_engine.py`. Next per Jeremy: remote
+  training infrastructure, then the large run once the LoRA-rank
+  ablation settles the rank.

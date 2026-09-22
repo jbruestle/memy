@@ -70,6 +70,15 @@ def base_of(model):
     return model.get_base_model() if hasattr(model, "get_base_model") else model
 
 
+def inner_model(model):
+    """The Qwen3_5Model (no LM head), with the mrope cache cleared: generate()
+    leaves a per-batch `rope_deltas` on it that later plain forwards would
+    reuse (silently when batch sizes divide, a shape error otherwise)."""
+    m = base_of(model).model
+    m.rope_deltas = None
+    return m
+
+
 @contextmanager
 def teacher_mode(model, ctx):
     """LoRA off, reads off, eval mode (generation needs use_cache), no grad."""
@@ -255,7 +264,7 @@ def write_pass(model, ctx, chunks, banks, pad_id, grad):
     ctx.collect_writes, ctx.write_only = True, True
     try:
         with (nullcontext() if grad else torch.no_grad()):
-            base_of(model).model(input_ids=ids, attention_mask=mask, use_cache=False)
+            inner_model(model)(input_ids=ids, attention_mask=mask, use_cache=False)
     finally:
         ctx.collect_writes, ctx.write_only = False, False
         ctx.memory, ctx.memory_mask, ctx.reads_enabled = None, None, False
@@ -330,7 +339,7 @@ def teacher_logits(model, ctx, prompts, gen_list, pad_id):
     ids, mask = pad_batch(full, pad_id, "right", device)
     base = base_of(model)
     with teacher_mode(model, ctx):
-        h = base.model(input_ids=ids, attention_mask=mask, use_cache=False)[0]
+        h = inner_model(model)(input_ids=ids, attention_mask=mask, use_cache=False)[0]
         outs = [base.lm_head(h[i, len(p) - 1:len(p) - 1 + len(g)])
                 for i, (p, g) in enumerate(zip(prompts, gen_list))]
     del h
@@ -355,7 +364,7 @@ def student_loss(model, ctx, encoder, enc_list, gen_list, t_logits, args, want_s
     ctx.log_stats = want_stats
     base = base_of(model)
     with (nullcontext() if grad_ok else torch.no_grad()):
-        h = base.model(input_ids=ids, attention_mask=mask, use_cache=False)[0]
+        h = inner_model(model)(input_ids=ids, attention_mask=mask, use_cache=False)[0]
         ctx.log_stats = False
         n0 = [len(encoder.open_ids) + len(e.prefix) for e in enc_list]
         sel = torch.cat([h[i, n0[i] - 1:n0[i] - 1 + len(g)] for i, g in enumerate(gen_list)], 0)

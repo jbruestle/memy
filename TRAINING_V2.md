@@ -455,6 +455,7 @@ All four planned sources exist and were checked through `peek_source.py`
 | wildchat | 838k rows (English non-toxic multi-turn subset) | 0.9k, 2.6k | 1.1k | 2t+1 (depth p50 3, p90 9, max 31) | cutoff t per (seed, epoch, row); ~1/3 of samples are depth 1 |
 | musique | 39.9k train / 4.8k dev (full) | 1.4k, 2.5k | 355 | 1–20 | unanswerables 15.1% realized (keep-prob computed from split counts); MuSiQue's supporting-paragraph annotations are occasionally noisy (answer not in gold) |
 | qasper | 888 papers / 2.6k q train, 281 / 1k dev | 15.3k, 23k | 8.0k | 1–5 | papers > `max_paper_tokens` (8192) dropped; teacher sees evidence only via `teacher_gold`; a run must set `--max-chunk-tokens` ≥ 8192. Demoted: small weight or eval-only (see below) |
+| copy | synthetic over TriviaQA pages (unbounded) | 0.9k, 1.6k | 0.6k | 1–4 | verbatim copy of a content-selected span (word / next / begins / between / ordinal), 19% with a near-duplicate hard negative; `meta.target` known ⇒ `probes/copy` scores EM + longest-correct-prefix; teacher EM 0.81 on 16 probes before the cue fix |
 | triviaqa | 77.6k q train / 7.9k dev (rc.wikipedia) | 11.6k, 21.9k | 4.1k | 1–11 | pages split at paragraph boundaries into ≤ `chunk_tokens` (4096) passages; rows with gold > `max_gold_tokens` (16384) or no alias hit dropped (75% kept); `teacher_gold` = lead paragraph + ≤3 alias-hit paragraphs per page (distant supervision) |
 
 Details: `bdsaglam/musique` (default config = MuSiQue-Full), `allenai/qasper`
@@ -464,6 +465,24 @@ Eval slices: ultrachat/wildchat = first `n_eval` eligible train rows
 (skipped by train); musique/qasper = the validation split. Per-sample
 randomness (cutoff, distractor draws) is seeded by (seed, epoch, id) so a
 resumed stream reproduces its draws.
+
+### Copy source (added 2026-09-22, Jeremy)
+
+`sources/copy.py` + `probes/copy.py` share one generator. Bank = a real
+passage (window of Wikipedia paragraphs, 150–600 tokens) + 0–2 distractor
+passages, 30% of the time including a near-duplicate of the gold passage
+with the cue words replaced and ~5% of other words perturbed. The user
+turn asks for a verbatim copy selected by CONTENT (the sentence containing
+"X"; the sentence after the one containing "X"; the paragraph beginning
+with "..."; the span from "A" to "B"), with a minority of ordinal
+selections (never alongside a near-duplicate). Purpose: content-addressed
+lookup followed by sequential readout — the induction-head analogue over
+the bank, which v1's prefix-correct / tail-lossy errors showed is the
+weak mechanism — plus the answer-first format. The probe reports exact
+match and longest-correct-prefix fraction overall, per kind and per
+target-length bucket, with the teacher alongside. Smoke run
+(`runs/smoke-copy`, 20 steps): clean; ~1k tokens/sample, 11.5 GB peak at
+batch 2. Later variant: copy from a prior assistant turn (self-writes).
 
 ### Long-document source: TriviaQA replaces Qasper (2026-09-21)
 
