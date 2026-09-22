@@ -509,6 +509,20 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   forward; regression added to `test_engine.py`. Next per Jeremy: remote
   training infrastructure, then the large run once the LoRA-rank
   ablation settles the rank.
+- **2026-09-22 (first cloud pod: calibration)** — 1×H100 pod bootstrapped
+  on volume `uwl0aoa2aa`; `runs/calib-b8` and `calib-b16` (100 steps,
+  wildchat:0.5,copy:0.25,musique:0.15,triviaqa:0.1, token budget 32k,
+  max_gen 1024). Findings, details in `cloud/README.md`: (1) the llama.cpp
+  teacher is a 3× bottleneck for 7 trainers (547 gen tok/s vs ~1,750
+  needed); vLLM gives 4–6k tok/s and is now the default backend (engine
+  `VllmTeacher`, auto-detected). (2) Batch 16 speeds the QA sources ~1.4×
+  but slows wildchat (superlinear student time with depth), net flat;
+  batch 32 OOMs next to a teacher. (3) fla 0.5.2 needs triton ≥ 3.7.1 on
+  Hopper (bootstrap pins it). (4) Bug fixed: `sources/copy.py` shared
+  triviaqa's eval-cache key, so whichever evaluated first served its eval
+  slice to the other (calib-b8's triviaqa eval_kl is really copy's).
+  (5) Sampler mixture weights are effectively per sample, not per batch.
+  Open before the 8×H100 run: batch/lr choice, GPU count, DDP untested.
 - **2026-09-22 (cloud plan)** — Provider/hardware advice recorded: cost per
   FLOP is ~flat from 4090 ($0.4–0.7/h) through H100 ($2–2.7/h, RunPod)
   to B200 ($5.9/h), so the knee is one full node data-parallel (sync is

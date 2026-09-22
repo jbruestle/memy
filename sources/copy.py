@@ -191,7 +191,7 @@ def make(cfg, rng, split, page_idx):
 
 
 def eval(cfg):
-    key = ("eval", cfg["eval_split"], cfg["n_eval"])
+    key = ("copy-eval", cfg["eval_split"], cfg["n_eval"])   # own key: triviaqa.eval shares this dict
     if key not in triviaqa._cache:
         out, split = [], cfg["eval_split"]
         for i in range(len(_pages(split))):

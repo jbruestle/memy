@@ -15,7 +15,7 @@ if curl -s -m 2 "http://127.0.0.1:$PORT/health" | grep -q ok; then
 fi
 CUDA_VISIBLE_DEVICES=$GPU nohup "$WS/llama.cpp/build/bin/llama-server" -m "$MODEL" \
   --host 127.0.0.1 --port "$PORT" -ngl 99 -fa on -c $((SLOTS * CTX)) -np "$SLOTS" \
-  -b 4096 -ub 1024 --no-mmproj > "$WS/teacher.log" 2>&1 &
+  -b 4096 -ub 1024 --no-mmproj > "$WS/teacher.log" 2>&1 < /dev/null &
 echo "teacher starting on GPU $GPU ($SLOTS slots x $CTX ctx), pid $!"
 for _ in $(seq 1 120); do
   if curl -s -m 2 "http://127.0.0.1:$PORT/health" | grep -q ok; then echo "teacher healthy"; exit 0; fi

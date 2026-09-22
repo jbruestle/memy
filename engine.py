@@ -479,6 +479,52 @@ class RemoteTeacher:
         return self.pool.submit(self.generate, prompts, max_gen, greedy)
 
 
+class VllmTeacher(RemoteTeacher):
+    """Same contract as RemoteTeacher against a vLLM OpenAI-compatible server
+    started with `--return-tokens-as-token-ids`: token-id prompts in via
+    /v1/completions, generated ids read back from `logprobs.tokens`
+    ("token_id:N"), so again no re-tokenization. Chosen automatically when
+    the server has /v1/models but no llama.cpp /props."""
+
+    def __init__(self, url, eos_id, max_conc=64, timeout=600):
+        import concurrent.futures as cf
+        self.url, self.eos_id, self.timeout = url.rstrip("/"), eos_id, timeout
+        self.pool = cf.ThreadPoolExecutor(max_conc)
+        m = self._post("/v1/models", {}, method="GET")["data"][0]
+        self.model = m["id"]
+        self.n_ctx = int(m.get("max_model_len") or 0) or None
+        self.slots = None
+
+    def tokenize(self, text):
+        return self._post("/tokenize", {"model": self.model, "prompt": text})["tokens"]
+
+    def _one(self, prompt, max_gen, greedy):
+        payload = {"model": self.model, "prompt": prompt, "max_tokens": max_gen, "logprobs": 0}
+        if greedy:
+            payload.update(temperature=0.0)
+        else:
+            payload.update(temperature=GEN_SAMPLING["temperature"], top_p=GEN_SAMPLING["top_p"],
+                           top_k=GEN_SAMPLING["top_k"])
+        c = self._post("/v1/completions", payload)["choices"][0]
+        toks = [int(t.split(":", 1)[1]) for t in c["logprobs"]["tokens"]]
+        if c.get("finish_reason") == "stop" and (not toks or toks[-1] != self.eos_id):
+            toks.append(self.eos_id)          # match HF: the target includes <|im_end|>
+        return toks[:max_gen]
+
+
+def make_remote_teacher(url, eos_id):
+    """llama.cpp if the server answers /props, else vLLM."""
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/props", timeout=30):
+            return RemoteTeacher(url, eos_id)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return VllmTeacher(url, eos_id)
+        raise
+
+
 class _Done:
     def __init__(self, value):
         self.value = value
@@ -510,11 +556,11 @@ class Teacher:
 
     def __init__(self, model, ctx, encoder, args):
         self.model, self.ctx, self.encoder, self.args = model, ctx, encoder, args
-        self.remote = RemoteTeacher(args.teacher_url, encoder.eos_id) if args.teacher_url else None
+        self.remote = make_remote_teacher(args.teacher_url, encoder.eos_id) if args.teacher_url else None
         self.n_local = 0
         if self.remote:
-            print(f"[remote teacher] {args.teacher_url}: {self.remote.slots} slots, "
-                  f"n_ctx {self.remote.n_ctx}", flush=True)
+            print(f"[remote teacher] {args.teacher_url} ({type(self.remote).__name__}): "
+                  f"{self.remote.slots} slots, n_ctx {self.remote.n_ctx}", flush=True)
 
     def _local(self, prompts, greedy):
         return teacher_generate(self.model, self.ctx, prompts, self.encoder.pad_id,

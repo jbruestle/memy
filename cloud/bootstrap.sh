@@ -12,10 +12,12 @@ export HF_HUB_DISABLE_PROGRESS_BARS=1
 mkdir -p "$HF_HOME" "$WS/gguf"
 
 echo "== code"
-if [ ! -d "$WS/memy/.git" ]; then
-  git clone "${REPO_URL:?set REPO_URL or rsync the repo to $WS/memy}" "$WS/memy"
-else
+if [ -d "$WS/memy/.git" ]; then
   (cd "$WS/memy" && git pull --ff-only || true)
+elif [ -f "$WS/memy/train_v2.py" ]; then
+  echo "  using rsync'd checkout (no .git)"
+else
+  git clone "${REPO_URL:?set REPO_URL or rsync the repo to $WS/memy}" "$WS/memy"
 fi
 
 echo "== python env ($WS/venv)"
@@ -28,6 +30,16 @@ pip install -q --upgrade pip
 pip install -q torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
 pip install -q transformers==5.2.0 peft==0.18.1 datasets==4.3.0 accelerate==1.13.0 \
     flash-linear-attention==0.5.2 safetensors huggingface_hub runpod
+# GDN fast path (causal-conv1d, CUDA build ~10 min, needs nvcc on PATH).
+if ! python -c "import causal_conv1d" 2>/dev/null; then
+  pip install -q wheel ninja packaging
+  PATH=/usr/local/cuda/bin:$PATH CUDA_HOME=/usr/local/cuda MAX_JOBS=32 \
+    pip install -q --no-build-isolation causal-conv1d==1.7.0
+fi
+# fla 0.5.2 refuses triton 3.4–3.7.0 on Hopper (wrong gated chunk_bwd results, fla#640);
+# torch 2.10 pins 3.6.0 but nothing here uses torch.compile, so override. Must come
+# AFTER causal-conv1d, whose install drags triton back to 3.6.0.
+pip install -q triton==3.7.1
 
 echo "== llama.cpp (teacher server)"
 if [ ! -x "$WS/llama.cpp/build/bin/llama-server" ]; then
