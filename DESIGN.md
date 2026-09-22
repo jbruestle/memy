@@ -2,15 +2,21 @@
 
 Status (2026-09-21): v1 answered positive (L2-v1 stopped at 14k steps,
 eval_kl 0.113, probe recall 0.93; readers-only and writer-gradient
-ablations done, see decision log). v2 training plan is settled in
-`TRAINING_V2.md`; next is building the v2 harness (multi-chunk samples,
-three data sources) and running it on cloud GPUs.
+ablations done, see decision log). v2 plan settled in `TRAINING_V2.md`;
+v2 harness built (`engine.py`, `train_v2.py`, plugin `sources/` and
+`probes/`), step-level parity with v1 exact, 1k-step trajectory
+regression `runs/L2-v2-regress` in progress. Next: tagged run, then
+WildChat / MuSiQue / long-doc sources, then cloud.
 
-Files: `model.py` (surgery), `data.py` (ultrachat + probes), `train.py`
-(loop; `--arm L0|L1|L2`), `test_step0.py` (identity test), `diag_mem.py`
-(per-phase VRAM watermarks), `probe_mech.py` (post-hoc mechanism battery),
-`chat.py` (REPL), `explore/` (exploration scripts + ultrachat sampler;
-run from repo root). Run with the `finetune` conda env and
+Files: `model.py` (surgery), `engine.py` (v2 executor: Sample -> chunks,
+passes, teacher, KL), `train_v2.py` (v2 loop: sampler, eval, probes,
+resume, DDP), `sources/` and `probes/` (plugins; see `TRAINING_V2.md`),
+`test_engine.py` (v1/v2 loss parity + multi-chunk smoke), `data.py`
+(v1 ultrachat + probe generator), `train.py` (v1 loop, kept for parity
+checks), `test_step0.py` (identity test), `diag_mem.py` (per-phase VRAM
+watermarks), `probe_mech.py` (post-hoc mechanism battery), `chat.py`
+(REPL; v1 encoding, untagged), `explore/` (v1 exploration scripts; run
+from repo root). Run with the `finetune` conda env and
 `PYTORCH_ALLOC_CONF=expandable_segments:True`.
 This doc is the cross-session source of truth. Update the decision log when anything changes.
 
@@ -419,3 +425,32 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   writes, write-gradients kept for gold + first 2 distractors only.
   Batches homogeneous in source and depth. Teacher inline, gold-context
   only. Expected 5–10× v1 per-sample cost → cloud GPUs for this run.
+- **2026-09-21 (v2 harness prep)** — `MemoryReader` now runs the read
+  through `F.scaled_dot_product_attention` (fused; the explicit
+  (B,heads,T,N) softmax is built only for stats/maps/top-K, under no_grad
+  unless top-K is on). Motivation: the explicit path stored the full score
+  matrix for backward (reader sits outside HF's checkpointed region); at
+  v2 sizes (T≈4k, N≈25k) that is ~2.4GB per site per sample vs 0.41GB
+  measured for the fused fwd+bwd. Agreement with the old path is bf16-level
+  (rel 5e-3 fwd and grads); ckpt-14000 32-probe recall 0.94 full / 0.94
+  topk4, identical to the explicit run; step-0 identity test still exact.
+  Harness v2 architecture agreed (Jeremy): dataset plugins yield one schema
+  (`id, source, gold[], distractors[], turns[]` + optional meta), the
+  engine derives the teacher transcript (gold prepended to the first user
+  turn), owns chunking/tags/batching/eval/resume/DDP; probes are plugins
+  too (supply samples in the same schema, receive student AND teacher
+  completions + read stats, return a JSON blob to log). Turn tags are a
+  flag so the ultrachat-only module can regress against the L2-v1 log
+  exactly. Build order: engine + `datasets/ultrachat` → untagged regression
+  → resume + DDP → tagged run → WildChat/MuSiQue/long-doc source (Qasper
+  likely swapped for NQ-with-Wikipedia-pages or demoted to a small weight).
+- **2026-09-21 (v2 harness built)** — `engine.py` + `train_v2.py` with
+  plugin `sources/` (ultrachat) and `probes/` (bindings); contract and
+  implementation notes in `TRAINING_V2.md`. Verified: v1 `training_step`
+  and v2 `student_loss` produce the identical loss on one batch
+  (`test_engine.py`); multi-chunk tagged sample runs fwd/bwd/generate;
+  4-step smoke + resume clean. Write passes now stop at the write site
+  (exact, ~37% cheaper) and logits are computed only at generated
+  positions. Measured: teacher generation is ~85% of a v1-sized step
+  (8.8 of 10.1 s at batch 8) — vLLM pregeneration moves up the list for
+  the cloud run. 1k-step regression vs L2-v1 running.

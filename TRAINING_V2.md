@@ -1,7 +1,8 @@
 # Training v2: multi-chunk, multi-source distillation
 
-Status: plan drafted 2026-09-21, pending review. Supersedes the earlier
-TRAINING_V2.md draft (moved out of the repo). Companion to `DESIGN.md`,
+Status: plan drafted and reviewed 2026-09-21; harness architecture agreed
+(see the section at the end). Supersedes the earlier TRAINING_V2.md draft
+(moved out of the repo). Companion to `DESIGN.md`,
 which remains the source of truth for the architecture and decision log.
 
 ## Goal
@@ -88,17 +89,22 @@ Chunk types:
   all background chunks of a batch run together in one (micro-batched)
   pass. Passage order is irrelevant, matching the permutation-invariant
   bank.
-- **User turn k.** User message: `[user turn k]: <text>`. Reads over
+- **User turn k.** User message: `[user turn k]:\n<text>`. Reads over
   background + all turns < k. Writes. No loss.
-- **Agent turn k, k < t.** Assistant message: `[agent turn k]: <as-is
+- **Agent turn k, k < t.** Assistant message: `[agent turn k]:\n<as-is
   dataset assistant text>`. Reads over everything before it. Writes. No
   loss. These are the off-distribution self-writes; at deployment the
   bank holds the model's own turns, so this mismatch is accepted rather
   than corrected (see Alternatives).
 - **Agent turn t (target).** Chat template opens the assistant turn; the
-  prefix `[agent turn t]: ` is force-fed and excluded from the loss; the
+  prefix `[agent turn t]:\n` is force-fed and excluded from the loss; the
   teacher-generated tokens are then teacher-forced and the KL is taken
   over them. Reads over everything. Does not need to write.
+
+Tags end in a newline, not a space, so the tokens after the tag are the
+same tokens the teacher produced after `assistant\n` (a trailing space
+would re-tokenize the first word). Tags are a flag (`--turn-tags`) so the
+v1-shaped regression run can be exact; the flag may be dropped later.
 
 Ordering across chunks comes **only from the turn tags**. Position ids
 restart per chunk (decided: tags are the trained-in order signal;
@@ -142,8 +148,11 @@ single plain chat transcript. **No turn tags** in the teacher transcript:
 tags are a student-side addressing device and the teacher should show
 ordinary assistant behaviour. The teacher generates the target turn
 (non-thinking sampling params), and its logits are captured in a no-grad
-forward afterwards, as in v1. No per-turn generation cap beyond the
-overall 64k transcript cap.
+forward afterwards, as in v1. Per-turn generation cap is a configurable
+soft cap (`--max-gen`, default ~1k for the cloud run, v1's 300 for local
+validation): a batch waits for its longest generation and the target
+chunk's logits scale with it, so an uncapped turn is a cost and memory
+hazard rather than a capability limit. The 64k transcript cap stays.
 
 - WildChat: transcript = the as-is history (untagged), open assistant turn.
   Teacher and student see the same text, differing only in access mode.
@@ -236,5 +245,178 @@ per head, probe recall), plus:
   schedule (MuSiQue 0..18, Qasper 0..4).
 - Unanswerables: MuSiQue-Full twins with ≥ 1 supporting paragraph kept at
   15% of MuSiQue samples; Qasper unanswerables dropped (no evidence).
-- Teacher generation: no per-turn cap, only the 64k transcript cap.
+- Teacher generation: configurable per-turn soft cap (amended from "no
+  cap" after the harness discussion) plus the 64k transcript cap.
 - Qasper papers are single chunks, never sectioned.
+
+## Harness architecture (agreed 2026-09-21)
+
+Everything below is source-agnostic: the engine never knows what a paper
+or a conversation is. Datasets and probes are plugins under `sources/`
+and `probes/` (plain modules; a registry by name, not dynamic loading).
+`sources/` rather than `datasets/` because the latter shadows the
+HuggingFace package. Built 2026-09-21: `engine.py`, `train_v2.py`,
+`sources/ultrachat.py`, `probes/bindings.py`, `test_engine.py`.
+
+### Sample schema
+
+One schema for training data, eval data, and probes:
+
+```python
+Sample = {
+  "id": str,                     # stable key: eval-target cache, resume cursor, logs
+  "source": str,                 # dataset / probe name
+  "gold": [str, ...],            # passages in the bank AND in the teacher context
+  "distractors": [str, ...],     # passages in the bank only
+  "turns": [("user", str), ("assistant", str), ..., ("user", str)],  # ends on the target's user turn
+  "meta": {...},                 # optional: answer (EM/F1), evidence (readmaps), anything the probe wants back
+}
+```
+
+The teacher transcript is derived by the engine, never by the dataset:
+gold passages (if any) are prepended to the first user turn under the
+`Please read the following:` wrapper, followed by the turns as-is and
+untagged, with the assistant turn open. This one rule covers WildChat
+(no gold), MuSiQue and long-doc QA (gold + one question turn), and
+ultrachat (no gold, one turn — the v1 degenerate case).
+
+### Dataset plugin
+
+`sources/<name>.py` exposes `train(cfg, seed, epoch, start, shard)` (an iterator of
+Samples in a deterministic per-seed-per-epoch permutation, so resume is an
+index), `eval(cfg)` (a fixed slice), and its own knobs (distractor range,
+length filters). Source-specific filtering and the gold/distractor split
+live entirely inside the module. The first module is `ultrachat` (v1
+data, `turns=[("user", q)]`), used to regress the new engine against the
+`runs/L2-v1/log.jsonl` trajectory with tags off.
+
+### Probe plugin
+
+`probes/<name>.py` exposes `samples(step) -> list[Sample]` (fixed seed,
+so curves are comparable across steps and runs), `interval` (steps), and
+`score(results) -> dict` (the JSON blob logged; the probe may also write
+its own files). For each sample the engine builds the bank (gold +
+distractors + prior turns), free-generates the **student** from memory,
+and free-generates the **teacher** from the derived transcript with gold
+in attention. The teacher never changes, so teacher completions are
+computed once per sample id and cached: the teacher ceiling on every
+probe comes for free (the 4B base may itself fall short of 100% on some
+probes, which this exposes). Each result carries both texts, per-sample
+read stats (entropy, argmax), and readmaps when the probe asks for them
+(per-chunk read mass; gold/evidence chunks are known from the sample).
+Per-source QA eval (MuSiQue / long-doc EM-F1 against `meta.answer`) is a
+probe over that dataset's eval slice; the v1 five-binding probe, the
+name-age scale test, distractor capture and the multi-turn split each
+become a probe module. Only the KL eval is engine-native.
+
+### Engine responsibilities
+
+- Chunk construction from a Sample: background chunks (each gold and
+  distractor passage, empty bank), turn chunks (tagged when
+  `--turn-tags`), target chunk (assistant opening + tag + teacher tokens).
+- Two background passes per batch: grad for gold + the first
+  `--distractor-grad-k` distractors, no-grad for the rest (a single
+  forward cannot mix the two). Then sequential turn passes with the bank
+  growing by concatenation (padded bank + mask across samples).
+- Teacher generate (inline, sampled, `--max-gen`) and teacher logits from
+  a forced forward; **logits only at the generated positions** (left-pad
+  the transcript and use `logits_to_keep`, or run the LM head on sliced
+  hidden states). Same for the student target chunk. The v1 code
+  computed full-transcript logits and sliced; at 8×5k×248k that is ~20GB.
+- Exact full-vocab KL as in v1 (`_KLSum`).
+- Batching by a **token budget** within homogeneous (source, depth)
+  buckets, with per-bucket queues so the data stays streaming; the
+  mixture weight picks the source, then a bucket proportional to size.
+- Eval KL per source on the fixed slices, teacher targets cached by
+  sample id (replaces the position-keyed `runs/eval-targets.json`).
+- Probes on their intervals; all diagnostics from v1 (read entropy,
+  argmax histograms) retained.
+- Checkpoint + resume: adapter, readers, optimizer, scheduler, step,
+  python/torch/cuda RNG, per-dataset (and per-rank) cursors, epoch. A
+  killed cloud run resumes exactly.
+- Data parallel: plain DDP over the trainable parameters only (~70M at
+  4B; at 27B each GPU still holds a full bf16 base copy, so DDP suffices
+  and FSDP is not needed). Each rank runs its own inline teacher
+  generation on its own shard of the stream; step time varies by rank
+  (buckets differ) and that is accepted. Written through one code path;
+  world size 1 is tested locally, multi-GPU first on the rented box.
+- Size knobs all configurable (`--max-gen`, chunk cap, transcript cap,
+  token budget, distractor ranges, grad-k, mixture) so the pipeline is
+  validated locally at v1 sizes and scaled on cloud hardware unchanged.
+
+### Validation plan
+
+1. Reader through the fused SDPA kernel — DONE 2026-09-21 (see DESIGN
+   decision log: ckpt-14000 recall 0.94 unchanged, step-0 identity exact,
+   fwd+bwd peak 0.41GB at T=4k over N=24k).
+2. Engine + `sources/ultrachat`, tags off, v1 sizes on the 4090:
+   eval_kl / recall trajectory over the first ~1k steps must track
+   `runs/L2-v1/log.jsonl` (same data order, batch 8). Step-level parity
+   is already exact (`test_engine.py`: v1 `training_step` and v2
+   `student_loss` give the identical loss on the same batch and teacher
+   tokens). Trajectory run `runs/L2-v2-regress` IN PROGRESS 2026-09-21;
+   v1 reference: eval_kl 0.342 / 0.292 / 0.263 / 0.244 at steps
+   250 / 500 / 750 / 1000, recall 0.13 at 1000.
+3. Resume: DONE at smoke scale (4 steps, checkpoint, resume for 2 more:
+   sampler cursor, optimizer, RNG restored). Kill-and-restart on the long
+   run still to be exercised.
+4. Same run with tags on: measures the tag cost.
+5. Add WildChat, MuSiQue, and the long-doc source; smoke-run each at
+   batch 2 with small caps to measure s/sample and peak VRAM before the
+   cloud budget is set.
+
+### Implementation notes (2026-09-21)
+
+Decisions made while building, beyond the contract above:
+
+- **Write passes stop at the write site.** `MemoryContext.write_only`
+  makes every wrapper above layer 19 return its input unchanged, and the
+  pass goes through the inner model only (no LM head, no full-vocab
+  logits). Nothing above the write site can affect the writes, so this is
+  exact and saves ~37% of write-pass compute plus the v1 pass-1 logits
+  (8×5k×248k would have been ~20GB).
+- **Logits at generated positions only**, for both teacher and target
+  pass: hidden states are gathered per sample and the LM head is applied
+  to the gathered rows. Not `logits_to_keep` (it is a single slice shared
+  across the batch); right padding is kept everywhere, so the GDN layers
+  see exactly v1's padding.
+- **Mixed empty/non-empty banks** in one batch (a MuSiQue sample with
+  zero distractors is still non-empty; the only all-empty case is turn 0
+  without background): an empty bank gets one zero memory, whose read
+  output is exactly zero. An all-empty batch runs with reads disabled.
+- **Teacher caches are per generation cap** (`runs/eval-targets-v2-g{max_gen}.json`,
+  `runs/probe-teacher-v2-g{max_gen}.json`), keyed by sample id. The v1
+  position-keyed `runs/eval-targets.json` is imported by order for the
+  ultrachat eval slice, so eval_kl stays comparable with L2-v1.
+- **Data parallel** is a manual flat all-reduce of trainable gradients
+  after backward rather than the DDP wrapper: a step makes several
+  forward calls plus a `generate`, which the wrapper's reducer handles
+  badly. Streams are sharded by row index (`row % world == rank`), the
+  checkpoint holds one `sampler-rank{r}.pt` (cursor + RNG) per rank next
+  to a single `state.pt`, and source exhaustion is all-reduced each step
+  so ranks stop together. Untested beyond world size 1.
+- **Sampler**: one queue per (source, depth); a batch is emitted when a
+  queue reaches `--batch` samples or `--token-budget` chunk tokens;
+  partial queues are flushed at epoch end; queued samples are stored raw
+  in the checkpoint and re-encoded on resume. Samples over
+  `--max-chunk-tokens` / `--max-prompt-tokens` are counted as dropped.
+- **Checkpoint layout**: `ckpt-N/` holds the PEFT adapter and
+  `readers.pt` (so `probe_mech.py` still loads it) plus `state.pt`
+  (trainable params, optimizer, scheduler, step) and the per-rank sampler
+  files. `--resume auto` picks the latest complete one.
+- **Probes** take `interval` from their cfg (default: eval interval),
+  and every result set is dumped to `probe-<name>-<step>.jsonl`.
+- **Measured at v1 sizes** (batch 8, 300-token cap, 4090): 10.1 s/step of
+  which teacher generation is 8.8 s. Generation is ~85% of the step, not
+  "roughly doubles" as v1 estimated; at scale the tokens-only vLLM
+  pregeneration is the first optimization to make, not a fallback.
+
+### Open: long-document source
+
+Qasper is small (2,593 train questions ⇒ ~15 epochs at a 20% slice over
+200k samples) and single-subject. Leading replacement: Natural Questions
+with the original Wikipedia pages (diverse topics, hundreds of thousands
+of items, annotated long-answer paragraph as evidence, other pages as
+distractors). To check before committing: page-length distribution
+against the 5k chunk cap. Qasper may stay at a small weight or move to
+eval only. The plugin design makes this a later, independent decision.

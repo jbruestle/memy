@@ -32,7 +32,7 @@ ITEM = ["kayak", "theremin", "microscope", "espresso machine", "unicycle", "loom
 REL = ["sister", "brother", "cousin", "neighbor", "landlord", "coworker"]
 
 
-def make_probes(n: int = 200, seed: int = 1234, path: str = "probes.jsonl"):
+def make_probes(n: int = 200, seed: int = 1234, path: str | None = "probes.jsonl"):
     """Questions with several independent arbitrary bindings that cannot be
     compressed into one gist vector. Bindings are recorded for exact-match
     scoring of free generations."""
@@ -51,9 +51,10 @@ def make_probes(n: int = 200, seed: int = 1234, path: str = "probes.jsonl"):
         probes.append({"question": q,
                        "bindings": {"name": name, "city": city, "relname": relname,
                                     "amount": str(owed), "year": str(year), "item": item}})
-    with open(path, "w") as f:
-        for p in probes:
-            f.write(json.dumps(p) + "\n")
+    if path:
+        with open(path, "w") as f:
+            for p in probes:
+                f.write(json.dumps(p) + "\n")
     return probes
 
 
