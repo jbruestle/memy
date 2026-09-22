@@ -454,3 +454,10 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   positions. Measured: teacher generation is ~85% of a v1-sized step
   (8.8 of 10.1 s at batch 8) — vLLM pregeneration moves up the list for
   the cloud run. 1k-step regression vs L2-v1 running.
+- **2026-09-21 (LoRA rank ablation, 5090, Jeremy)** — v1-style run at
+  LoRA r=64 (vs 16). Early trajectory is slightly SLOWER per step to a
+  given loss / recall than r=16; running to convergence to see whether
+  it ends at a higher recall plateau (the 2026-09-21 ablation note said
+  more rank is valuable; this checks the endpoint rather than the speed).
+  Result pending. The 5090 also hosts the llama.cpp teacher server for
+  the local v2 runs (`--teacher-url`, Q8_0 GGUF, 16 slots).
