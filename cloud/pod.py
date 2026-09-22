@@ -1,6 +1,10 @@
-"""RunPod pod management for memy. Needs RUNPOD_API_KEY in the environment.
+"""RunPod pod management for memy. Needs RUNPOD_API_KEY in the environment
+(`source ~/.config/memy/runpod.env`).
 
+  python cloud/pod.py dcs                        # data centers: volume support + GPU stock (LOW/MEDIUM/HIGH)
   python cloud/pod.py gpus                       # GPU types + on-demand prices
+  python cloud/pod.py volume list
+  python cloud/pod.py volume create --dc US-NE-1 --size 150 --name memy
   python cloud/pod.py create --gpu H100 --count 1 --volume <network-volume-id>
   python cloud/pod.py list
   python cloud/pod.py ssh <pod-id>               # print the ssh command
@@ -14,10 +18,28 @@ verify. Pod creation passes REPO_URL through to the pod environment.
 """
 
 import argparse
+import json
 import os
 import sys
+import urllib.request
 
 import runpod
+
+REST = "https://rest.runpod.io/v1"
+CATALOG = "https://api.runpod.io/v2/catalog"
+WANT_GPUS = ["NVIDIA H100 80GB HBM3", "NVIDIA H100 PCIe", "NVIDIA H100 NVL", "NVIDIA H200",
+             "NVIDIA B200", "NVIDIA RTX PRO 6000 Blackwell Server Edition", "NVIDIA GeForce RTX 5090"]
+
+
+def _rest(method, url, payload=None):
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={"Authorization": f"Bearer {os.environ['RUNPOD_API_KEY']}",
+                                          "Content-Type": "application/json",
+                                          "User-Agent": "memy-cloud/0.1"})  # default urllib UA gets 403
+    with urllib.request.urlopen(req, timeout=60) as r:
+        body = r.read()
+    return json.loads(body) if body else {}
 
 DEFAULT_IMAGE = "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04"
 
@@ -41,6 +63,34 @@ def cmd_gpus(args):
         if args.filter and args.filter.lower() not in gid.lower():
             continue
         print(f"{gid:40s} {mem or 0:4d} {sp or 0:10.2f} {cp or 0:13.2f}")
+
+
+def cmd_dcs(args):
+    _key()
+    d = _rest("GET", CATALOG + "/datacenters?include=GPU_AVAILABILITY")
+    short = [w.replace("NVIDIA ", "").replace("GeForce ", "").replace(" Blackwell Server Edition", "")
+             .replace(" 80GB HBM3", " SXM") for w in WANT_GPUS]
+    print(f"{'dc':9s} {'region':14s} {'volumes':10s} " + " ".join(f"{x:>12s}" for x in short))
+    for dc in d["dataCenters"]:
+        av = {g["id"]: g["availability"] for g in dc.get("gpuAvailability", [])}
+        if not dc.get("networkVolumeTypes") and not args.all:
+            continue
+        if not any(av.get(w, "NONE") != "NONE" and w in av for w in WANT_GPUS) and not args.all:
+            continue
+        vol = ",".join(v[:4] for v in dc.get("networkVolumeTypes", [])) or "-"
+        print(f"{dc['id']:9s} {dc['region']:14s} {vol:10s} " +
+              " ".join(f"{av.get(w, '-'):>12s}" for w in WANT_GPUS))
+
+
+def cmd_volume(args):
+    _key()
+    if args.vcmd == "list":
+        for v in _rest("GET", REST + "/networkvolumes") or []:
+            print(f"{v['id']}  {v.get('name'):12s} {v.get('size')} GB  {v.get('dataCenterId')}")
+    else:
+        v = _rest("POST", REST + "/networkvolumes",
+                  {"name": args.name, "size": args.size, "dataCenterId": args.dc})
+        print("created volume:", v.get("id"), v.get("size"), "GB in", v.get("dataCenterId"))
 
 
 def _gpu_id(name):
@@ -109,6 +159,12 @@ def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("gpus"); g.add_argument("--filter", default=None); g.set_defaults(f=cmd_gpus)
+    dcs = sub.add_parser("dcs"); dcs.add_argument("--all", action="store_true"); dcs.set_defaults(f=cmd_dcs)
+    v = sub.add_parser("volume"); vs = v.add_subparsers(dest="vcmd", required=True)
+    vs.add_parser("list")
+    vc = vs.add_parser("create"); vc.add_argument("--dc", required=True); vc.add_argument("--size", type=int, default=150)
+    vc.add_argument("--name", default="memy")
+    v.set_defaults(f=cmd_volume)
     c = sub.add_parser("create")
     c.add_argument("--name", default="memy")
     c.add_argument("--gpu", default="NVIDIA H100 80GB HBM3")
