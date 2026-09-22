@@ -3,10 +3,13 @@
 Status (2026-09-21): v1 answered positive (L2-v1 stopped at 14k steps,
 eval_kl 0.113, probe recall 0.93; readers-only and writer-gradient
 ablations done, see decision log). v2 plan settled in `TRAINING_V2.md`;
-v2 harness built (`engine.py`, `train_v2.py`, plugin `sources/` and
-`probes/`), step-level parity with v1 exact, 1k-step trajectory
-regression `runs/L2-v2-regress` in progress. Next: tagged run, then
-WildChat / MuSiQue / long-doc sources, then cloud.
+v2 harness built and regression-passed (see decision log 2026-09-22);
+six sources (ultrachat, wildchat, musique, qasper, triviaqa, copy) and
+two probes (bindings, copy) smoke-tested on GPU; RunPod tooling in
+`cloud/` with volume `uwl0aoa2aa` in US-NE-1 created. NEXT (fresh
+session): `cloud/README.md` → 1×H100 calibration pod → 8×H100 run once
+Jeremy's LoRA-rank ablation settles the rank. Teacher = llama.cpp on the
+pod's last GPU. Remote teacher server on dev-5090 was for local runs only.
 
 Files: `model.py` (surgery), `engine.py` (v2 executor: Sample -> chunks,
 passes, teacher, KL), `train_v2.py` (v2 loop: sampler, eval, probes,

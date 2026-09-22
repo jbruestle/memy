@@ -6,24 +6,35 @@ llama.cpp, and `memy/runs/` with checkpoints and caches). Pods are
 disposable; the volume is not. On an N-GPU pod the last GPU serves the
 teacher (llama.cpp) and the other N−1 train data-parallel via `torchrun`.
 
-## One-time
+## State (2026-09-22)
 
-1. RunPod console → Settings → API key. Locally: `export RUNPOD_API_KEY=...`
-   (the `runpod` package is installed in the `finetune` env).
-2. Console → Storage → new **network volume**, 150 GB, in a data center
-   that lists H100 80GB (and B200 for later). Note its id and data center.
-3. Console → Settings → add your SSH public key.
-4. Push the repo (private is fine): `git push origin main`. For the pod to
-   clone it, make a fine-grained GitHub token with read access to the repo
-   and use `REPO_URL=https://<token>@github.com/jbruestle/memy.git`.
-   Alternative without a token: `rsync -av --exclude runs --exclude .git
-   ~/memy/ root@<pod>:/workspace/memy/`.
+- API key: `source ~/.config/memy/runpod.env` on the Seattle box (not in git).
+- Network volume **`uwl0aoa2aa`**, 150 GB, **US-NE-1** (chosen 2026-09-22:
+  the only North-American data center with standard volumes and H100 SXM
+  stock in two availability snapshots; stock is volatile, check
+  `python cloud/pod.py dcs` before creating a pod; no volume-capable DC
+  showed B200 that day — the 27B run may need a second volume elsewhere).
+- Jeremy's SSH key is registered in RunPod and GitHub; the repo is pushed.
+- Code onto the pod: the pod has no GitHub credentials, so rsync from the
+  Seattle box (`rsync -av --exclude runs --exclude .git --exclude __pycache__
+  ~/memy/ root@<ip>:/workspace/memy/ -e "ssh -p <port>"`), then run
+  `bootstrap.sh` without `REPO_URL`. A read token in `REPO_URL` works too.
+- `pod.py create` defaults: secure cloud, `runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04`
+  (verify the tag still exists), 50 GB container disk, ports 22 + 8080.
+
+## One-time (done)
+
+1. API key (console → Settings) — stored as above.
+2. Network volume — created via `python cloud/pod.py volume create --dc US-NE-1 --size 150`.
+3. SSH public key in the console.
+4. Repo pushed.
 
 ## First pod (1×H100): bootstrap + calibration
 
-    python cloud/pod.py create --gpu H100 --count 1 --volume <vol-id> --dc <dc> \
-        --repo-url "https://<token>@github.com/jbruestle/memy.git"
-    python cloud/pod.py ssh <pod-id>          # prints the ssh command
+    source ~/.config/memy/runpod.env
+    python cloud/pod.py create --gpu "NVIDIA H100 80GB HBM3" --count 1 --volume uwl0aoa2aa --dc US-NE-1
+    python cloud/pod.py ssh <pod-id>          # prints the ssh command (wait until the pod shows a public port)
+    rsync -av --exclude runs --exclude .git --exclude __pycache__ ~/memy/ root@<ip>:/workspace/memy/ -e "ssh -p <port>"
     # on the pod:
     bash /workspace/memy/cloud/bootstrap.sh    # ~15 min first time: env, llama.cpp build, ~20 GB downloads, engine test
     cd /workspace/memy && bash cloud/launch.sh --run-name calib --sources wildchat:0.4,musique:0.2,triviaqa:0.2,copy:0.2 \
