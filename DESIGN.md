@@ -474,6 +474,13 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   more rank is valuable; this checks the endpoint rather than the speed).
   Result pending. The 5090 also hosts the llama.cpp teacher server for
   the local v2 runs (`--teacher-url`, Q8_0 GGUF, 16 slots).
+- **2026-09-22 (LoRA rank ablation: NEGATIVE, Jeremy)** — r=64 vs r=16
+  (v1-style run on the 5090, to convergence): slower per step to a given
+  loss/recall and the same probe plateau (~0.90). Higher LoRA rank buys
+  nothing here; r=16 stays. Corrects the 2026-09-21 note that "more rank
+  is valuable" (that was the early-speed read, not the endpoint). The 5090
+  is free again; next experiment there: top-K reads from step 0
+  (`--read-top-k`, expected to hamper early learning — see Deferred).
 - **2026-09-22 (v2 harness regression PASSED)** — `runs/L2-v2-regress`:
   new engine, ultrachat only, tags off, batch 8, teacher = llama.cpp Q8_0
   on dev-5090 (`--teacher-url`, prefetch 4). Trajectory vs L2-v1

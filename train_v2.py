@@ -322,6 +322,9 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--warmup", type=int, default=100)
     ap.add_argument("--lora-r", type=int, default=16)
+    ap.add_argument("--read-top-k", type=int, default=0,
+                    help="mask reads to the top-K memories per query DURING TRAINING (0 = full "
+                         "softmax); uses the explicit score path, so v1-scale banks only")
     ap.add_argument("--read-heads", type=int, default=4)
     ap.add_argument("--read-rank", type=int, default=128)
     ap.add_argument("--write-layer", type=int, default=19)
@@ -359,6 +362,7 @@ def main():
             print(rec, flush=True); logf.write(json.dumps(rec) + "\n"); logf.flush()
 
     tok, model, ctx = build_model(args)
+    ctx.top_k = args.read_top_k or None   # applies to train, eval and probes alike
     encoder = Encoder(tok, args.turn_tags, args.max_chunk_tokens, args.max_prompt_tokens)
     overrides = parse_cfg(args.cfg)
     sources = []
