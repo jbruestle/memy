@@ -95,7 +95,15 @@ volume keeps everything).
     python cloud/pod.py create --gpu H100 --count 8 --volume <vol-id> --dc <dc> --name memy-8
     # on the pod (bootstrap is a no-op now except git pull + test):
     bash /workspace/memy/cloud/bootstrap.sh
-    cd /workspace/memy && bash cloud/launch.sh --run-name v2-main --sources ... --batch 8 ... --max-steps 25000
+    cd /workspace/memy && bash cloud/launch.sh --run-name v2-topk8 \
+        --sources wildchat:0.5,copy:0.25,musique:0.15,triviaqa:0.1 --batch 8 --token-budget 32768 \
+        --max-chunk-tokens 8192 --max-gen 1024 --turn-tags --probes bindings,copy \
+        --eval-interval 250 --max-steps 12000 --read-top-k 8
+
+`--read-top-k 8` from step 0: on ultrachat it trained ~3× faster than the
+full softmax and plateaued higher (DESIGN log 2026-09-23); the training
+read then goes through `MemoryReader._gathered` (K winners gathered, dense
+softmax over them), which is also the deployment read.
 
 `launch.sh` starts the teacher on GPU 7 (vLLM, 64 seqs × 8k context), then
 `torchrun --nproc_per_node 7`. Each rank logs its own steps; rank 0 writes
