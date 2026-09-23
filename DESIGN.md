@@ -566,6 +566,13 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   0.55 EM, long targets 0.22, "sentence after X" still 0. Real names and
   4-digit years now appear in probe letters ("Dear Patrick", "in 1970"),
   still often the wrong ones. Read entropy 0.59.
+  STOPPED at 7000 (ckpt-7000 kept as the full-softmax baseline): eval
+  0.252/0.142/0.431/0.650, recall 0.54 (item 0.94, relname 0.66, year
+  0.53, amount 0.38, name 0.19), copy EM 0.16 / prefix 0.31. Superseded
+  by `runs/v2-topk8`: identical command + `--read-top-k 8` from step 0
+  (Jeremy: restart rather than switch mid-stream, so the reproducible
+  story is "top-K from scratch on the hard mixture"; ckpt-7000 vs
+  v2-topk8's ckpt-7000 is the planned A/B). Jeremy added $200 credit.
 - **2026-09-22 (first cloud pod: calibration)** — 1×H100 pod bootstrapped
   on volume `uwl0aoa2aa`; `runs/calib-b8` and `calib-b16` (100 steps,
   wildchat:0.5,copy:0.25,musique:0.15,triviaqa:0.1, token budget 32k,
