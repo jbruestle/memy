@@ -524,6 +524,15 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   forward; regression added to `test_engine.py`. Next per Jeremy: remote
   training infrastructure, then the large run once the LoRA-rank
   ablation settles the rank.
+- **2026-09-23 (top-K from step 0: NOT crippling, 5090, Jeremy)** —
+  `runs/L2-v2-topk8`: the L2-v2-regress recipe (ultrachat, tags off,
+  batch 8, max_gen 300) with `--read-top-k 8` from the first step. At
+  1000: eval_kl 0.240 vs 0.255 full-softmax, recall 0.075 vs 0.15 (item
+  0.28, name/relname/year 0.03, amount 0). So a hard top-8 over ~300
+  memories does not prevent early learning — the "zero gradient to
+  unselected memories" worry is weaker than expected (with N≈300 and K=8,
+  random queries still sample the bank widely across positions/heads).
+  Continuing to 6000 steps to compare the plateau against v1's 0.875@4500.
 - **2026-09-22/23 (v2-main launched)** — `runs/v2-main` on pod `memy-2`
   (2×H100, both training, vLLM teacher co-located on GPU 1; no 4-GPU stock
   in US-NE-1): wildchat:0.5,copy:0.25,musique:0.15,triviaqa:0.1, batch 8,
