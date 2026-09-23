@@ -73,8 +73,12 @@ class MemoryReader(nn.Module):
         v = self.mem_v(mem).view(B, N, self.n_heads, self.rank).transpose(1, 2)
         attn_mask = mask.bool()[:, None, None, :] if mask is not None else None   # True = attend
         if ctx.top_k is not None and ctx.top_k < N:
-            # Diagnostics-only path: needs the explicit score matrix.
-            mix = self._explicit(q, k, v, attn_mask, ctx, N)
+            if ctx.capture_maps:
+                # Readmaps need the full (B, heads, T, N) softmax.
+                mix = self._explicit(q, k, v, attn_mask, ctx, N)
+            else:
+                # Training/eval top-K: gather the K winners, dense read over them.
+                mix = self._gathered(q, k, v, attn_mask, ctx, N, ctx.top_k)
         else:
             # Fused kernel: never materializes the (B, heads, T, N) score matrix,
             # which at v2 sizes (T~5k, N~25k) would be tens of GB per sample.
@@ -84,6 +88,45 @@ class MemoryReader(nn.Module):
                     self._explicit(q, k, v, attn_mask, ctx, N)
         mix = mix.transpose(1, 2).reshape(B, T, self.n_heads * self.rank)
         return self.mem_o(mix)
+
+    def _gathered(self, q, k, v, attn_mask, ctx, N, K, chunk=512):
+        """Top-K read without the full score matrix: scores are computed in
+        query chunks under no_grad only to pick the K indices per query; the
+        differentiable read is a dense softmax over the gathered K keys/values
+        (exactly the deployment MIPS read). Memory is O(T*K*r) per site
+        instead of O(T*N), so it scales to v2 banks (T~8k, N~25k)."""
+        B, H, T, r = q.shape
+        scale = 1.0 / math.sqrt(r)
+        mb = attn_mask[:, 0, 0, :] if attn_mask is not None else None       # (B, N) bool
+        with torch.no_grad():
+            kt = k.transpose(-1, -2)
+            idx = torch.empty(B, H, T, K, dtype=torch.long, device=q.device)
+            for t0 in range(0, T, chunk):
+                s = torch.matmul(q[:, :, t0:t0 + chunk], kt) * scale         # (B, H, c, N)
+                if mb is not None:
+                    s = s.masked_fill(~mb[:, None, None, :], torch.finfo(s.dtype).min)
+                idx[:, :, t0:t0 + chunk] = s.topk(K, dim=-1).indices
+        # Gather K keys/values per query: flat index into (B*H*N, r).
+        base = (torch.arange(B * H, device=q.device) * N).view(B, H, 1, 1)
+        flat = (idx + base).reshape(-1)
+        kk = k.reshape(B * H * N, r).index_select(0, flat).view(B, H, T, K, r)
+        vv = v.reshape(B * H * N, r).index_select(0, flat).view(B, H, T, K, r)
+        s = (q.unsqueeze(3) * kk).sum(-1) * scale                            # (B, H, T, K)
+        if mb is not None:
+            mg = mb.gather(1, idx.reshape(B, -1)).view(B, H, T, K)
+            s = s.masked_fill(~mg, torch.finfo(s.dtype).min)
+        p = F.softmax(s.float(), dim=-1).to(v.dtype)
+        if ctx.log_stats:
+            with torch.no_grad():
+                pf = p.float()
+                ent = -(pf * (pf + 1e-9).log()).sum(-1).mean(dim=(1, 2))    # (B,)
+                n = mb.float().sum(-1).clamp(min=2) if mb is not None \
+                    else torch.full_like(ent, N)
+                am = idx.gather(-1, pf.argmax(-1, keepdim=True)).float()
+                ctx.stats.append({"layer": self.layer_idx,
+                                  "entropy": (ent / n.log()).mean().item(),
+                                  "argmax_mean_pos": am.mean().item()})
+        return (p.unsqueeze(-1) * vv).sum(3)                                 # (B, H, T, r)
 
     def _explicit(self, q, k, v, attn_mask, ctx, N):
         """Reference read with the full softmax materialized (stats, maps, top-K)."""
