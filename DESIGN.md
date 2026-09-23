@@ -546,6 +546,14 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   apology letters with the retrieved item. Decision (Jeremy): continue as
   is; harder set, slower footing, hopefully more robust. Reporting per
   1000 steps. Credits allow ~step 12k at best (~$7/h).
+  Overnight (2026-09-23): eval 0.256/0.329/0.464/0.685 at 5000; copy KL
+  fell 8× between 3500 and 5000 as verbatim readout switched on (90+ char
+  spans reproduced exactly; longest-correct-prefix 0.17–0.19, EM bouncy
+  0–0.125; the "sentence after X" kind still 0). All five bindings
+  non-zero by 4500 (5000: item 0.81, year 0.22, relname 0.09, amount
+  0.06, name 0.03; recall 0.24) with v1's tail-lossy digit/name blends.
+  Probe-time read entropy 0.97 → 0.61. Checkpoints every 1000 on the
+  volume.
 - **2026-09-22 (first cloud pod: calibration)** — 1×H100 pod bootstrapped
   on volume `uwl0aoa2aa`; `runs/calib-b8` and `calib-b16` (100 steps,
   wildchat:0.5,copy:0.25,musique:0.15,triviaqa:0.1, token budget 32k,
