@@ -524,6 +524,19 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   forward; regression added to `test_engine.py`. Next per Jeremy: remote
   training infrastructure, then the large run once the LoRA-rank
   ablation settles the rank.
+- **2026-09-22/23 (v2-main launched)** — `runs/v2-main` on pod `memy-2`
+  (2×H100, both training, vLLM teacher co-located on GPU 1; no 4-GPU stock
+  in US-NE-1): wildchat:0.5,copy:0.25,musique:0.15,triviaqa:0.1, batch 8,
+  token budget 32k, max_gen 1024, lr 1e-4, 16 samples/step, ~6.6–7 s/step,
+  ckpt every 1000. Eval KL (wildchat/copy/musique/triviaqa) 0.336/2.790/
+  0.761/1.163 at 250 → 0.283/2.607/0.635/0.952 at 2250, monotone on every
+  source. Bindings recall 0 through 1750, then item first (0.19 at 2000,
+  0.31 at 2250; other bindings 0) — v1's acquisition order, ~2× slower per
+  step and ~4× per sample (harder mixture, multi-depth chat, 1k targets).
+  Probe text went wildchat-mission → placeholder letters → typed slots →
+  apology letters with the retrieved item. Decision (Jeremy): continue as
+  is; harder set, slower footing, hopefully more robust. Reporting per
+  1000 steps. Credits allow ~step 12k at best (~$7/h).
 - **2026-09-22 (first cloud pod: calibration)** — 1×H100 pod bootstrapped
   on volume `uwl0aoa2aa`; `runs/calib-b8` and `calib-b16` (100 steps,
   wildchat:0.5,copy:0.25,musique:0.15,triviaqa:0.1, token budget 32k,
