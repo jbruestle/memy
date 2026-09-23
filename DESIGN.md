@@ -553,7 +553,13 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   non-zero by 4500 (5000: item 0.81, year 0.22, relname 0.09, amount
   0.06, name 0.03; recall 0.24) with v1's tail-lossy digit/name blends.
   Probe-time read entropy 0.97 → 0.61. Checkpoints every 1000 on the
-  volume.
+  volume. At 6000: eval 0.254/0.187/0.446/0.663 (wildchat, musique,
+  triviaqa flattening; copy still falling); bindings recall 0.47 (item
+  0.75, year 0.78, amount 0.44, relname 0.25, name 0.16 — amount jumped
+  0.03→0.44 in 250 steps); copy EM 0.19 / prefix 0.26, by kind: between
+  0.55 EM, long targets 0.22, "sentence after X" still 0. Real names and
+  4-digit years now appear in probe letters ("Dear Patrick", "in 1970"),
+  still often the wrong ones. Read entropy 0.59.
 - **2026-09-22 (first cloud pod: calibration)** — 1×H100 pod bootstrapped
   on volume `uwl0aoa2aa`; `runs/calib-b8` and `calib-b16` (100 steps,
   wildchat:0.5,copy:0.25,musique:0.15,triviaqa:0.1, token budget 32k,
