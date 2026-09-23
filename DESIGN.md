@@ -172,14 +172,10 @@ sets, transcript structures): see `TRAINING_V2.md` (rewritten 2026-09-21).
   for exact softmax; top-K sweep on ckpt-14000 showed K=1–8 lossless.
 - Sparsity/low-entropy regularization on read softmax (note: in tension with
   decay-mixing semantics — keep an unregularized arm when we get there).
-- Top-K in the *training* forward (Jeremy, 2026-09-22): only after reads
-  have sharpened (trigger on normalized read entropy, e.g. < 0.5, possibly
-  annealing K down), never from the start — a hard top-K gives zero gradient
-  to unselected memories, so near-uniform queries could never discover
-  better ones. Needs a non-explicit path (top-K mask under no_grad fed to
-  SDPA, or gather-then-dense over the K winners); the explicit path that
-  serves probes materializes the full score matrix. Purpose is robustness
-  to the sparse inference read, since post-hoc K=1–8 was already lossless.
+- ~~Top-K in the training forward only after reads have sharpened~~ —
+  SUPERSEDED 2026-09-23: top-8 from step 0 trains faster and plateaus
+  higher than full softmax (see decision log). Remaining work: the
+  gather-then-dense read path for v2 bank sizes, and a K sweep.
 - Update semantics: per-query learned exponential decay over matches.
 - Explicit position/order features in memories (v1 relies on states being
   causal-contextual). v2 supplies order only via turn tags in the chunk
@@ -533,6 +529,16 @@ of H100 per FLOP. Consumer 24–32GB cards need a quantized base — avoid.
   unselected memories" worry is weaker than expected (with N≈300 and K=8,
   random queries still sample the bank widely across positions/heads).
   Continuing to 6000 steps to compare the plateau against v1's 0.875@4500.
+  RESULT (5750 steps): top-8 from step 0 BEATS full softmax — eval_kl
+  0.240/0.179/0.131/0.127 at 1000/1750/4500/5750 vs v1 0.244/0.186/0.137
+  (0.113 at 14k); recall 0.08/0.45/0.93/0.94 vs v1 0.13/0.40/0.875 (0.93
+  at 14k); plateau ~0.94–0.95 reached by 4500, ~3× fewer steps than v1.
+  Reading: hard top-K is a sharpening prior — only the K winners get
+  gradient, so queries commit early instead of learning a diffuse mixture
+  first; with N≈300 and 32 heads the random init still covers the bank.
+  Consequence: train with top-K from the start (supersedes the
+  entropy-trigger plan in Deferred); needs the gather-then-dense read path
+  for v2 bank sizes (the explicit path stores the full score matrix).
 - **2026-09-22/23 (v2-main launched)** — `runs/v2-main` on pod `memy-2`
   (2×H100, both training, vLLM teacher co-located on GPU 1; no 4-GPU stock
   in US-NE-1): wildchat:0.5,copy:0.25,musique:0.15,triviaqa:0.1, batch 8,
