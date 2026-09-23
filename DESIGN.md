@@ -172,6 +172,14 @@ sets, transcript structures): see `TRAINING_V2.md` (rewritten 2026-09-21).
   for exact softmax; top-K sweep on ckpt-14000 showed K=1–8 lossless.
 - Sparsity/low-entropy regularization on read softmax (note: in tension with
   decay-mixing semantics — keep an unregularized arm when we get there).
+- Top-K in the *training* forward (Jeremy, 2026-09-22): only after reads
+  have sharpened (trigger on normalized read entropy, e.g. < 0.5, possibly
+  annealing K down), never from the start — a hard top-K gives zero gradient
+  to unselected memories, so near-uniform queries could never discover
+  better ones. Needs a non-explicit path (top-K mask under no_grad fed to
+  SDPA, or gather-then-dense over the K winners); the explicit path that
+  serves probes materializes the full score matrix. Purpose is robustness
+  to the sparse inference read, since post-hoc K=1–8 was already lossless.
 - Update semantics: per-query learned exponential decay over matches.
 - Explicit position/order features in memories (v1 relies on states being
   causal-contextual). v2 supplies order only via turn tags in the chunk
